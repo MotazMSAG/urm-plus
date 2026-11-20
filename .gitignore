@@ -15,3 +15,16 @@ urm_compat/URM_MAP.md
 CLAUDE.md
 URM_fix.bat
 props/
+
+# Hold URM's own code or text taken from games: stay local (2026-11-21 scan)
+urm_compat/ui_tweaks.py
+urm_compat/tests/check_search.py
+urm_compat/tests/check_force.py
+urm_compat/tests/graph_harness.py
+urm_compat/tests/check_gates.py
+urm_compat/tests/decomp.py
+urm_compat/tests/check_flags.py
+urm_compat/tests/graph_corpus.py
+urm_compat/tests/check_maze.py
+urm_compat/tests/check_alerts.py
+urm_compat/CODE_MAP.md
