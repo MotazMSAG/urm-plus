@@ -4,3 +4,14 @@
 dist/
 __pycache__/
 *.pyc
+
+# URM decompiles, game-derived research and private notes stay local
+urm_compat/reference/
+urm_compat/research/
+urm_compat/tests/baseline/URM_fix_single_file.bat
+urm_compat/FINDINGS.md
+urm_compat/IDEAS.md
+urm_compat/URM_MAP.md
+CLAUDE.md
+URM_fix.bat
+props/
