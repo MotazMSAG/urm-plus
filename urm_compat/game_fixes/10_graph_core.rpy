@@ -137,6 +137,14 @@ init 999 python:
     #   CAN be where ways meet are told from the shape of the story first
     #   (_urmsg_closing), and only those are looked at.
     _URMSG_FIX_MEET = True
+    #   FUNCS (a game told in phone texts, the user's pick c, 2026-11-21):
+    #   a python line that does nothing but call one of the game's own
+    #   functions (`$ text_message(phone, "Ann", _("Hi"))`, one text) was
+    #   read as a change and drawn as code. Now the function is read from
+    #   the script and followed (_urmsg_call_quiet): the line is not said
+    #   when nothing it changes is read by a test of the story. Every other
+    #   line is read as before.
+    _URMSG_FIX_FUNCS = True
 
     class _URMSGState(python_object):
         __slots__ = ("g", "kinds", "classes", "passes", "pass_classes")
@@ -150,7 +158,10 @@ init 999 python:
 
     class _URMSGraph(python_object):
         __slots__ = ("gen", "script", "count", "over", "facts", "labels",
-                     "py", "q", "skipped", "arms", "rets", "tl")
+                     "py", "q", "skipped", "arms", "rets", "tl", "fns", "defs",
+                     "checked", "trees", "fdefs", "effects", "methods", "checked_why",
+                     "lines", "twin", "base", "choices", "screens", "homes",
+                     "stretch")
 
         def __init__(self, gen):
             self.gen = gen
@@ -169,6 +180,36 @@ init 999 python:
             # The statements of one language's translation blocks
             # (_urmsg_tl): (language, {id: (statement, identifier)}).
             self.tl = None
+            # A line that only calls a game function: whether it is said
+            # (_urmsg_call_quiet), by its text; where the script's python
+            # blocks stand (_urmsg_defs): file -> [(first line, source)];
+            # every path a test of the story reads (_urmsg_checked).
+            self.fns = python_dict()
+            self.defs = None
+            self.checked = None
+            # The same, remembered: a block's source parsed; a function's
+            # def (by id of its code); what a call of it changes, by what
+            # it is handed (_urmsg_fn_effects).
+            self.trees = python_dict()
+            self.fdefs = python_dict()
+            self.effects = python_dict()
+            # The name of every method a class of the script defines.
+            self.methods = None
+            # Why the tests could not all be followed (_urmsg_checked).
+            self.checked_why = None
+            # What a story line writes, by its text (_urmsg_line_effects).
+            self.lines = python_dict()
+            # The map rework's readers (12, "The player's ways"): the twin
+            # they run in (its own memories, _urmsg_own), and on a twin the
+            # graph it was made from; a choice of any shape by statement;
+            # a screen's choice by name; the block each statement sits in.
+            self.twin = None
+            self.base = None
+            self.choices = python_dict()
+            self.screens = python_dict()
+            self.homes = None
+            # The stretch table (12, "Free roam and the kind of a stretch").
+            self.stretch = None
 
     class _URMSGFact(python_object):
         __slots__ = ("node", "k", "nx", "label", "dyn", "target", "via",
@@ -212,11 +253,14 @@ init 999 python:
             self.drop = None
 
     class _URMSGChain(python_object):
-        __slots__ = ("steps", "meta", "live", "lost", "cut")
+        __slots__ = ("steps", "meta", "ways", "live", "lost", "cut")
 
         def __init__(self):
             self.steps = python_list()
             self.meta = python_list()
+            # Parallel to steps: what each way does to the next (12,
+            # _urmsg_gate_read).
+            self.ways = python_list()
             self.live = False
             self.lost = False
             self.cut = False
@@ -300,7 +344,9 @@ init 999 python:
         try:
             node = renpy.game.script.lookup(name)
         except BaseException as error:
-            if g is not None and type(error).__name__ == "ScriptError":
+            se = getattr(getattr(renpy, "script", None), "ScriptError", None)
+            is_miss = isinstance(error, se) if isinstance(se, type) else (type(error).__name__ == "ScriptError")
+            if g is not None and is_miss:
                 if len(g.labels) >= _URMSG_CAP_LABELS:
                     g.labels.clear()
                 g.labels[name] = False
@@ -948,16 +994,13 @@ init 999 python:
         return hit
 
     def _urmsg_blocks_urm(node):
-        """URM's own test for a statement that waits for the player."""
-
-        if hasattr(node, 'interact') and node.interact:
+        """Whether the reader stops at this interaction or pause."""
+        if getattr(node, "interact", False):
             return True
-        elif _urmsg_kind(node) == _URMSG_K_USER and hasattr(node, 'get_code') and callable(node.get_code):
-            code = node.get_code()
-            if code == 'pause':
-                return True
-
-        return False
+        if _urmsg_kind(node) != _URMSG_K_USER:
+            return False
+        user_statement = getattr(node, "get_code", None)
+        return callable(user_statement) and user_statement() == "pause"
 
     # ------------------------------------------------------------------
     # Two ways of taking one step
@@ -965,8 +1008,8 @@ init 999 python:
 
     def _urmsg_step_urm(node):
         """
-        URM's nextNode: the statement after this one, a jump or call
-        followed to its label. _URMSG_LOST where URM's own code raises.
+        The next statement for the look-ahead reader. Follow a jump or call
+        to its target, or return _URMSG_LOST if a lookup fails.
         """
 
         k = _urmsg_kind(node)

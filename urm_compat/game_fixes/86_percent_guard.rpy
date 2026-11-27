@@ -5,9 +5,7 @@
 # With config.old_substitutions on - the engine default through Ren'Py 7 -
 # every line is run through Python's % formatting before it is shown, so a
 # line the writer typed as "100% correct" has to be "100%% correct". Games
-# ship with the single %, and the line stops the game with "%c requires int
-# or char" (Freeloading Family 0.32, ver21.rpy:602 - the plain game, with no
-# URM at all, fails the same way).
+# can ship a single percent sign and raise the Python formatting error.
 #
 # Only a line whose formatting would fail is touched: its % signs are
 # doubled, so it shows exactly as written. A line that formats - including
@@ -39,6 +37,6 @@ init 999 python:
             renpy.exports.say = _urmpct_exports_say
             renpy.say = _urmpct_exports_say
     except Exception as error:
-        print("URM+: stray-percent guard not installed (%s)" % (error,))
+        print("MRM: stray-percent guard not installed (%s)" % (error,))
 
 

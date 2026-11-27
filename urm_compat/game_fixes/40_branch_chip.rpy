@@ -4,13 +4,16 @@
 #
 # The player's question (IDEAS.md, PRIORITY): "am I on the part everyone
 # sees, or in a part that only plays because of a variable or a choice - and
-# when am I back?" Three things are said, as one small chip in URM's
-# notification column:
+# when am I back?" Three things are said on the URM+ button (the user's b,
+# 2026-11-22: what a feature says, 01_urm_door and 17_hub draw it):
 #
-#   Only because Ch3bloody is yes  [strip]  2 more     in such a part
-#   Back on the shared part        [strip]             the first shared line
-#   Skipped a part - needs Ch3bloody yes               a check just passed
-#                                                      over lines others see
+#   yellow, a badge with the lines left    in such a part; the menu's head:
+#                                          "Only because Ch3bloody is yes"
+#   green for one line, a check mark       the first shared line: "Back on
+#                                          the shared part"
+#   blue, a grey badge for one line        a check just passed over lines
+#                                          others see: "Skipped a part -
+#                                          needs Ch3bloody yes"
 #
 # How it knows. Guessing the way from one line to the next is wrong too
 # often (fast skip, calls, two arms that both reach the next line), and the
@@ -71,11 +74,16 @@ init 999 python:
     _URMB_AHEAD = 400        # statements walked to count the lines left
     _URMB_MEMO = 4000        # checks remembered
 
-    try:
-        x52URM.SettingsClass.defaultValues.setdefault("urmcBranchChip", 2)
-        x52URM.SettingsClass.defaultValues.setdefault("urmcBranchPos", None)
-    except Exception as error:
-        print("URM+: branch notification setting not registered (%s)" % (error,))
+    _urm_setting_add("urmcBranchChip", 2)
+    # where players dropped the old chip: kept in their settings, read by
+    # nothing since the chip is the button's badge (2026-11-22)
+    _urm_setting_add("urmcBranchPos", None)
+
+    # its row on the URM+ settings page (the registry, 01_urm_door)
+    _urm_row_add("branch_chip", "story", "Branch notification",
+                 "Says when the line on screen is there only because of a check or a choice you made.",
+                 (("Branches and skipped parts", 2), ("Branches", 1), ("Off", 0)),
+                 setting="urmcBranchChip", order=10)
 
     # (name of the line, frames, flash) or None. A frame is
     # (check name, arm, rejoin name, drawn, searched); flash is None,
@@ -871,10 +879,7 @@ init 999 python:
             ctx = renpy.game.context()
             if not ctx.rollback or ctx.init_phase or ctx.current is None:
                 return
-            try:
-                level = x52URM.Settings.get("urmcBranchChip")
-            except Exception:
-                level = 2
+            level = _urm_setting("urmcBranchChip")
             if level is None:
                 level = 2
             st.level = level
@@ -932,7 +937,7 @@ init 999 python:
         if _urmb_forget not in config.after_load_callbacks:
             config.after_load_callbacks.append(_urmb_forget)
     except Exception as error:
-        print("URM+: branch notification not hooked (%s)" % (error,))
+        print("MRM: branch notification not hooked (%s)" % (error,))
 
     # ------------------------------------------------------------------
     # Words
@@ -981,10 +986,9 @@ init 999 python:
             return "Only because of a check"
         return "Only because %s" % said
 
-    _URMB_NEED = python_dict((
-        ("==", ""), (">=", ""), (">", "over "), ("<=", "at most "),
-        ("<", "under "), ("!=", "not "),
-    ))
+    # The goal words' own "needs" table (15_words), plus is and is not.
+    _URMB_NEED = python_dict(_URM_GOAL_NEED)
+    _URMB_NEED.update((("==", u""), ("!=", u"not ")))
 
     def _urmb_needs(cond):
         """'needs Ch3bloody yes' for the arm that was passed over, without
@@ -999,7 +1003,7 @@ init 999 python:
             # Name the part that is not met; more than one, or none: say less.
             pick = None
             for part in parts:
-                if "(" not in part and _urm_truth(part) is False:
+                if _urm_truth(part) is False:
                     if pick is not None:
                         return None
                     pick = part
@@ -1011,32 +1015,25 @@ init 999 python:
         who = _urmm_pretty(m.group(2))
         if m.group(3):
             return "%s %s%s" % (who, _URMB_NEED[m.group(3)], _urmm_value(m.group(4)))
-        return "%s %s" % (who, "off" if m.group(1) else "on")
-
-    def _urmb_truth(cond):
-        """Judging a test to count the lines ahead must not run the game's
-        functions (a dice roll would be used up): those are "cannot tell"."""
-
-        if "(" in (u"%s" % (cond,)):
-            return None
-        return _urm_truth(cond)
+        return "%s %s" % (who, "false" if m.group(1) else "true")
 
     def _urmb_left(cur, stop):
         """Lines still to come before `stop` the way the game stands now,
-        or None when that cannot be told (a menu, a return, a dice roll)."""
+        or None when that cannot be told (a menu, a return, a dice roll:
+        _urm_truth never runs a test that calls a function)."""
 
         if cur is None or stop is None:
             return None
         count = 0
         steps = 0
-        node = _urmsg_step_live(cur, _urmb_truth)
+        node = _urmsg_step_live(cur, _urm_truth)
         while node is not None and steps < _URMB_AHEAD:
             steps += 1
             if node is stop:
                 return count
             if _urmb_is_line(node):
                 count += 1
-            node = _urmsg_step_live(node, _urmb_truth)
+            node = _urmsg_step_live(node, _urm_truth)
         return None
 
     # ------------------------------------------------------------------
@@ -1044,7 +1041,9 @@ init 999 python:
     # ------------------------------------------------------------------
 
     def _urmb_view(state, closed, level):
-        """(tone, words, count or None, strip, closable) or None - pure."""
+        """(tone, words, lines left after this one or None, kind, closable)
+        or None - pure. kind: "in" a part, "back" on its first shared
+        line, "skip" past a skipped part."""
 
         top = None
         outer = None
@@ -1062,13 +1061,7 @@ init 999 python:
                 return None
             words = _urmb_reason(_urmb_info(n), top[1])
             left = _urmb_left(_urmb_node(state[0]), _urmb_node(outer[2]))
-            if left is None:
-                more = None
-            elif left == 0:
-                more = "last line"
-            else:
-                more = "%d more" % left
-            return ("warn", words, more, "in", True)
+            return ("warn", words, left, "in", True)
 
         flash = state[2]
         if flash is None:
@@ -1101,8 +1094,7 @@ init 999 python:
             st = _urmb_st
             if not st.level:
                 return None
-            ctx = renpy.game.context()
-            if not ctx.rollback or ctx.init_phase:
+            if not _urm_in_game():
                 return None
             if renpy.config.skipping:
                 return None
@@ -1120,88 +1112,60 @@ init 999 python:
         except BaseException:
             return None
 
+
     def urm_branch_close():
-        """The X: hidden until the story is back on the shared part."""
+        """Hide: nothing said until the story is back on the shared part.
+        A store name real saves hold (FINDINGS.md): it stays."""
 
         _urmb_st.closed = True
         renpy.restart_interaction()
 
-    def urm_branch_pos():
-        """
-        Where the chip sits: where the player last dropped it, else bottom
-        left, on the row where most games have their quick menu - close to
-        the dialogue, where the eye already is. Kept per game as a fraction
-        of the screen, so it survives a change of window size.
-        """
-
-        try:
-            w = config.screen_width
-            h = config.screen_height
-            try:
-                kept = x52URM.Settings.get("urmcBranchPos")
-            except Exception:
-                kept = None
-            if kept and len(kept) == 2:
-                x = int(kept[0] * w)
-                y = int(kept[1] * h)
-            else:
-                x = x52URM.scalePxInt(12)
-                y = h - x52URM.scalePxInt(46)
-            return (max(0, min(x, w - x52URM.scalePxInt(80))),
-                    max(0, min(y, h - x52URM.scalePxInt(30))))
-        except Exception:
-            return (12, 12)
-
     def urm_branch_dragged(drags, drop):
-        """The chip was dropped somewhere: that is its place from now on."""
+        """Did the old chip's drag: does nothing now. A store name real
+        saves hold (FINDINGS.md): without it they would not load."""
 
-        try:
-            d = drags[0]
-            x52URM.Settings.set("urmcBranchPos", (
-                float(d.x) / max(1, config.screen_width),
-                float(d.y) / max(1, config.screen_height)))
-        except Exception:
-            pass
+        return None
 
-    def urm_branch_strip(kind, height, tone):
-        """
-        The tiny picture beside the words: the shared line, a raised
-        detour, the shared line again, and a square for "you" - on the
-        detour ("in"), or past it ("back", "skip"; a skipped detour is
-        drawn as dashes).
-        """
+    # ------------------------------------------------------------------
+    # What the URM+ button says (the user's b, 2026-11-22)
+    # ------------------------------------------------------------------
 
-        try:
-            ink = urm_map_colour(tone + "Text")
-            h = max(8, int(height))
-            t = max(2, h // 8)
-            w = h * 4
-            base = h - t - h // 5
-            top = h // 5
-            a = w // 4
-            b = w - a
-            d = max(4, h // 3)
-            parts = Fixed(xysize=(w, h))
-            parts.add(Solid(ink, xysize=(a, t), xpos=0, ypos=base))
-            parts.add(Solid(ink, xysize=(w - b, t), xpos=b, ypos=base))
-            if kind == "skip":
-                dash = max(2, (b - a) // 7)
-                x = a + dash
-                while x + dash <= b - dash:
-                    parts.add(Solid(ink, xysize=(dash, t), xpos=x, ypos=top))
-                    x += 2 * dash
+    # The badge's picture, from the kit's icon font: a split, as the corner
+    # card's choices have (call_split; the route map has alt_route), a
+    # check mark (check), a way around what was passed over (shortcut).
+    _URMB_ICON = python_dict((("in", u"\ue0b6"), ("back", u"\ue5ca"), ("skip", u"\uf060")))
+    _URMB_HIDE = u"Hide until the paths meet"
+
+    def _urmb_says(view):
+        """What the button says for urm_branch_view's `view`, as the
+        doorway takes it (_urm_status_add): (tone, icon, count, tip, head,
+        hide) or None - pure. In a part: yellow, the lines left counting the
+        one on screen (the last shows 1), or the picture alone when that
+        cannot be told; back: green with a check mark for that one line;
+        skipped: the button stays blue, a grey badge for that one line."""
+
+        if view is None:
+            return None
+        tone, words, left, kind, closable = view
+        # the game's own words, drawn as text: a brace of theirs made safe
+        words = (u"%s" % (words,)).replace(u"{", u"{{")
+        icon = _URMB_ICON.get(kind, _URMB_ICON["in"])
+        if kind == "in":
+            if left is None:
+                count, tip = None, u"The paths are still apart"
+            elif left == 0:
+                count, tip = u"1", u"Last line before the paths meet"
             else:
-                parts.add(Solid(ink, xysize=(b - a, t), xpos=a, ypos=top))
-                parts.add(Solid(ink, xysize=(t, base - top + t), xpos=a, ypos=top))
-                parts.add(Solid(ink, xysize=(t, base - top + t), xpos=b - t, ypos=top))
-            if kind == "in":
-                parts.add(Solid(ink, xysize=(d, d), xpos=(a + b - d) // 2,
-                                ypos=max(0, top + t // 2 - d // 2)))
-            else:
-                parts.add(Solid(ink, xysize=(d, d), xpos=b + (w - b - d) // 2,
-                                ypos=min(h - d, base + t // 2 - d // 2)))
-            return parts
-        except Exception:
-            return Null()
+                count, tip = u"%d" % (left + 1), u"%d lines until the paths meet" % (left + 1)
+            return ("warn", icon, count, tip, words,
+                    (_URMB_HIDE, urm_branch_close) if closable else None)
+        if kind == "back":
+            return ("gain", icon, None, u"The paths meet on this line", words, None)
+        return ("skip", icon, None, u"Others may see a part here", words, None)
 
+    def _urmb_status():
+        """The button asks at every draw: what the line on screen says."""
 
+        return _urmb_says(urm_branch_view())
+
+    _urm_status_add("branch", _urmb_status)

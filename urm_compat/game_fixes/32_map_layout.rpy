@@ -63,8 +63,9 @@
         if _urmm_st.engine is not False:
             try:
                 w, h = renpy.text.text.Text(
-                    urm_map_esc(text), style="x52URM_text", size=s(size),
-                    bold=bold, substitute=False).size(room or 100000, 100000)
+                    urm_map_esc(text), style="urmk_text", size=s(size),
+                    font=URMK_FONTS["medium" if bold else "regular"],
+                    substitute=False).size(room or 100000, 100000)
                 out = (int(w + 0.999), int(h + 0.999))
                 _urmm_st.engine = True
             except Exception:
@@ -216,7 +217,9 @@
         parts = python_list()
         if box.kind == "here":
             parts.append(("pill", _urmm_text(u"you are here", 14, s, None, True)[1] + 2 * s(1)))
-        if box.title:
+        if box.kind == "here" and getattr(box, "heard", None):
+            parts.append(("title", _urmm_text(box.heard, 19, s, room)[1]))
+        elif box.title:
             high = _urmm_text(box.title, 19, s, room, loud)[1]
             if box.have:
                 cw, ch = _urmm_chip_size(box.have[0], s)
@@ -479,6 +482,21 @@
             return None
         return "if", python_list(zip(labels, arms)), plan[1], at_rejoin()
 
+    def _urmm_heard():
+        """The line the player heard last, in quotes, as the "you are here"
+        box shows it in place of the scene's name (UX rule 4); None in a
+        game that keeps no history: then the box keeps the scene's name."""
+
+        try:
+            history = getattr(renpy.store, "_history_list", None) or ()
+            what = history[-1].what if history else None
+        except Exception:
+            what = None
+        if not what:
+            return None
+        words = _urmm_re.sub(r"\{[^{}]*\}", u"", u"%s" % (what,)).strip()
+        return u"\u201c%s\u201d" % (_urm_clip(words, 90),) if words else None
+
     def _urmm_label_of(node, index):
         """
         The label the node is in, as the map words it: the story graph's
@@ -534,6 +552,7 @@
         stack = _urmsg_frames(live)
         blocks, fork, end = _urmm_stretch(here, stack=stack)
         first = _URMMBox("here", _urmm_label_of(here, index) or blocks[0][0] or "Here", 0)
+        first.heard = _urmm_heard()
         _urmm_fill(first, blocks[0][1])
         last = chain(first, blocks[1:])
 
@@ -582,7 +601,7 @@
         follows a split sits to the right of all its ways.
         """
 
-        s = x52URM.scalePxInt
+        s = urmk_px_cut
         W, GAP, MARGIN, T, ROW = s(_URMM_BOX_W), s(56), s(24), max(2, s(4)), s(12)
         DOT = s(18)
         MARK = s(_URMM_LEAD_W)
@@ -756,10 +775,10 @@
 
             if view.mini is None or view.mini[0] != (k, mw, mh):
                 base = Fixed(xysize=(mw, mh))
-                base.add(Solid(urm_map_colour("screenSolid"), xysize=(mw, mh)))
+                base.add(Solid(urm_map_ink("box"), xysize=(mw, mh)))
                 top = (total_h - view.height) // 2
                 for b in view.boxes:
-                    colour = urm_map_colour("root" if b.kind in ("here", "merge") else "muted")
+                    colour = urm_map_ink("overview-accent" if b.kind in ("here", "merge") else "muted")
                     base.add(Solid(colour,
                                    xysize=(max(2, int(b.w * k)), max(2, int(b.h * k))),
                                    xpos=int(b.x * k), ypos=int((b.y + top) * k)))
@@ -771,7 +790,7 @@
             y = int(yadj.value * k)
             w = max(4, int(shown_w * k))
             h = max(4, int(shown_h * k))
-            ink = urm_map_colour("ink")
+            ink = urm_map_ink("ink")
             out.add(Solid(ink, xysize=(w, 2), xpos=x, ypos=y))
             out.add(Solid(ink, xysize=(w, 2), xpos=x, ypos=min(mh - 2, y + h - 2)))
             out.add(Solid(ink, xysize=(2, h), xpos=x, ypos=y))

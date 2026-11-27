@@ -4,11 +4,13 @@
 #
 # Some games set every line in Comic Sans. "Game font" in Miscellaneous swaps
 # the game's fonts for one that already ships: DejaVu Sans and OpenDyslexic
-# come with every Ren'Py, Roboto, Comfortaa and Roboto Mono with URM.
+# come with every Ren'Py, Roboto, Comfortaa and Roboto Mono with URM+ (our
+# own copies from Google Fonts, urm_compat/fonts, under the OFL).
 #
 # It rides on the engine's own accessibility hook (preferences.font_transform
 # plus config.font_transforms, there since Ren'Py 6.99 - the Shift+A font
-# override). The transform leaves URM's own fonts and any icon font alone,
+# override). The transform leaves our screens' fonts, URM's own (while URM
+# is installed beside us, its screens keep their font) and any icon font alone,
 # and keeps the game's font for characters the new one does not have, so a
 # Japanese or emoji line still renders. With "Game's own" the preference is
 # put back to None, and an unknown transform name is ignored by the engine,
@@ -16,14 +18,12 @@
 
 init 999 python:
 
-    try:
-        x52URM.SettingsClass.defaultValues.setdefault("urmcFont", None)
-    except Exception as error:
-        print("URM+: font setting not registered (%s)" % (error,))
+    _urm_setting_add("urmcFont", None)
 
     # Characters Roboto, Comfortaa and Roboto Mono all have (read from the
-    # fonts URM ships): Latin with accents, Greek, Cyrillic, punctuation.
-    # DejaVu Sans has all of them too.
+    # fonts URM shipped; ours have them all, tests/check_fonts.py): Latin
+    # with accents, Greek, Cyrillic, punctuation. DejaVu Sans has all of them
+    # too.
     _URMFT_CHARSET = ("20-7e a0-148 14a-17f 192 1a0-1a1 1af-1b0 1fa-1ff 218-21b 237 259 2bc "
                       "2c6-2c7 2c9 2d8-2dd 300-301 303 309 30f 323 384-38a 38c 38e-3a1 3a3-3ce "
                       "400-45f 462-463 46a-46b 472-475 490-49d 4a0-4a5 4aa-4ab 4ae-4b1 4b6-4bb "
@@ -37,9 +37,9 @@ init 999 python:
     # character, with no fallback, so a Japanese line became boxes.
     _URMFT_FONTS = (
         ("dejavu", "DejaVu Sans", "DejaVuSans.ttf", None),
-        ("roboto", "Roboto", "0x52-URM/framework/Roboto-Regular.ttf", None),
-        ("comfortaa", "Comfortaa", "0x52-URM/Comfortaa.ttf", None),
-        ("mono", "Roboto Mono", "0x52-URM/RobotoMono.ttf", None),
+        ("roboto", "Roboto", "urmplus/fonts/Roboto-Regular.ttf", None),
+        ("comfortaa", "Comfortaa", "urmplus/fonts/Comfortaa.ttf", None),
+        ("mono", "Roboto Mono", "urmplus/fonts/RobotoMono.ttf", None),
         ("dyslexic", "OpenDyslexic", "_OpenDyslexic3-Regular.ttf", "opendyslexic"),
     )
 
@@ -84,8 +84,8 @@ init 999 python:
         if not isinstance(f, (str, type(u""))):
             return True   # already a FontGroup the game built - leave it whole
         name = f.replace("\\", "/").lower()
-        if name.startswith("0x52-urm/"):
-            return True
+        if name.startswith("urmplus/"):
+            return True     # the screen kit has its own fonts
         return any(word in name for word in _URMFT_KEEP)
 
     def _urmft_map(key, f):
@@ -118,10 +118,7 @@ init 999 python:
         config.font_transforms["urmplus"] = _urmft_transform
 
     def _urmft_wanted():
-        try:
-            key = x52URM.Settings.get("urmcFont")
-        except Exception:
-            return None
+        key = _urm_setting("urmcFont")
         return key if _urmft_find(key) is not None else None
 
     def _urmft_sync(reset):
@@ -141,14 +138,21 @@ init 999 python:
             renpy.display.interface.display_reset = True
             renpy.restart_interaction()
 
+    def _urmft_choices():
+        """[(words, value)]: the game's own font, then each one it can load."""
+        rows = [("Game's own", None)]
+        rows += [(name, key) for key, name, _p, _e in _urmft_available()]
+        return rows
+
+    # The row in URM's options page (a hook) asks these two, until our own
+    # settings page takes its place.
     def urmft_options():
-        rows = [("{urm_notl}Game's own{/urm_notl}", None)]
-        rows += [("{urm_notl}%s{/urm_notl}" % name, key) for key, name, _p, _e in _urmft_available()]
-        return x52URM.OrderedDict(rows)
+        import collections
+        return collections.OrderedDict(_urmft_choices())
 
     def urmft_label():
         row = _urmft_find(_urmft_wanted())
-        return "{urm_notl}%s{/urm_notl}" % (row[1] if row else "Game's own")
+        return row[1] if row else "Game's own"
 
     def _urmft_interact():
         try:
@@ -159,25 +163,19 @@ init 999 python:
     try:
         _urmft_sync(False)
     except Exception as error:
-        print("URM+: game font not applied (%s)" % (error,))
+        print("MRM: game font not applied (%s)" % (error,))
 
     if _urmft_interact not in config.interact_callbacks:
         config.interact_callbacks.append(_urmft_interact)
 
     # Apply at once when the option is clicked, not at the next line.
-    try:
-        _urmft_set = x52URM.SettingsClass.set
-        _urmft_set = getattr(_urmft_set, "__func__", _urmft_set)
-        if not getattr(_urmft_set, "_urmft", False):
-            def _urmft_settings_set(self, name, *args, **kwargs):
-                rv = _urmft_set(self, name, *args, **kwargs)
-                if name == "urmcFont":
-                    try:
-                        _urmft_sync(True)
-                    except Exception:
-                        pass
-                return rv
-            _urmft_settings_set._urmft = True
-            x52URM.SettingsClass.set = _urmft_settings_set
-    except Exception as error:
-        print("URM+: game font applies from the next line (%s)" % (error,))
+    def _urmft_changed():
+        _urmft_sync(True)
+
+    _urm_setting_watch("urmcFont", _urmft_changed)
+
+    # ---- the URM+ settings page (the registry, 01_urm_door)
+
+    _urm_row_add("game_font", "look", "Game font",
+                 "Shows the game's text in another font. Only fonts that already ship are offered.",
+                 _urmft_choices, setting="urmcFont", order=10)

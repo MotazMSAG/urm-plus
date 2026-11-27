@@ -22,85 +22,6 @@
 
 init 999 python:
 
-    def _urmfl_index():
-        index = _urmi_index()
-        if index is None or index.state != "ready" or not getattr(index, "flags", None):
-            return None
-        return index
-
-    def _urmfl_record(name):
-        index = _urmfl_index()
-        if index is None or not isinstance(name, _urmi_text):
-            return None
-        return index.flags.get(name)
-
-    def _urmfl_getters(index):
-        found = getattr(index, "_urmflGetters", None)
-        if found is None:
-            found = python_dict()
-            for fname, (role, coll, _attr) in index.helpers.items():
-                if role == "get" and coll not in found:
-                    found[coll] = fname
-            index._urmflGetters = found
-        return found
-
-    def _urmfl_name_of(node):
-        """The flag a test is, for true("x") and "x" in coll - else None."""
-
-        index = _urmfl_index()
-        if index is None:
-            return None
-        if isinstance(node, _urmi_ast.Call):
-            if not isinstance(node.func, _urmi_ast.Name) or not node.args:
-                return None
-            ok, word = _urmi_literal(node.args[0])
-            if not ok or not isinstance(word, _urmi_text):
-                return None
-            name = u'%s("%s")' % (node.func.id, word)
-            return name if name in index.flags else None
-        if isinstance(node, _urmi_ast.Compare) and len(node.ops) == 1 and \
-                isinstance(node.ops[0], (_urmi_ast.In, _urmi_ast.NotIn)):
-            ok, word = _urmi_literal(node.left)
-            coll = _urmi_name(node.comparators[0])
-            if not ok or not isinstance(word, _urmi_text) or coll is None:
-                return None
-            getter = _urmfl_getters(index).get(coll)
-            name = u'%s("%s")' % (getter, word) if getter else u'"%s" in %s' % (word, coll)
-            return name if name in index.flags else None
-        return None
-
-    def _urmfl_collection(rec):
-        try:
-            value = _urmp_ev(_urmp_parse(rec.coll))
-        except Exception:
-            return None
-        if value is _URMP_UNK:
-            return None
-        return value
-
-    def _urmfl_matches(rec, member):
-        if rec.attr:
-            return getattr(member, rec.attr, None) == rec.word
-        return member == rec.word
-
-    def urmfl_is_on(name):
-        """True / False, or None when the game has not made the collection yet."""
-
-        rec = _urmfl_record(name)
-        if rec is None:
-            return None
-        coll = _urmfl_collection(rec)
-        if coll is None:
-            return False
-        try:
-            if isinstance(coll, python_dict):
-                return bool(coll.get(rec.word))
-            for member in coll:
-                if _urmfl_matches(rec, member):
-                    return True
-            return False
-        except Exception:
-            return None
 
     def _urmfl_object(rec):
         """The object that stands for an object-kept flag, e.g. kim_mercy_path."""
@@ -182,35 +103,25 @@ init 999 python:
             rows.append((name, _urmi_safe(rec.word), urmfl_is_on(name), _urmi_safe(info)))
         return (rows, matched)
 
+    # ---- a name old saves hold
+    #
+    # The Flags dialog before our own sheet (until 2026-11-22) kept one of
+    # these in its screen's scope, and it was not modal, so a save made with
+    # a flag's Details open names it (FINDINGS). Kept so such a save loads:
+    # the class takes whatever the save holds and does nothing.
+
     class _URMFlagVar(python_object):
-        """What the variable panel needs from a variable, for a flag."""
+        pass
 
-        isFlag = True
-        isEditable = True
-        varType = "boolean"
+    # ---- a flag's Details: the variable sheet (our own, with URM or
+    # without), on our layer, so it opens and closes here.
 
-        def __init__(self, name):
-            self.name = name
-            rec = _urmfl_record(name)
-            self.word = _urmi_safe(rec.word if rec else name)
-            if rec is None:
-                self.where = u""
-            elif rec.getter:
-                self.where = _urmi_safe(u"Kept in %s, tested with %s()" % (rec.coll, rec.getter))
-            else:
-                self.where = _urmi_safe(u"Kept in %s" % rec.coll)
-
-        @property
-        def value(self):
-            return urmfl_is_on(self.name)
-
-    def urmfl_var(name):
-        return _URMFlagVar(name)
-
-    def _urmfl_open(name):
+    def urmfl_details(name):
         if renpy.has_screen("urmfl_flag_dialog"):
-            renpy.show_screen("urmfl_flag_dialog", name=name)
+            renpy.show_screen("urmfl_flag_dialog", name=name, _layer=_urmi_layer)
             renpy.restart_interaction()
+
+    _urmfl_open = urmfl_details
 
     config.hyperlink_handlers["URMFlag"] = _urmfl_open
 
@@ -236,5 +147,37 @@ init 999 python:
             return _URMFL_CALL.sub(link, coloredCode)
         except Exception:
             return coloredCode
+
+    # ---- the Flags list (game_screens/83_flags): on our layer, so it opens
+    # and closes here, not with Show and Hide (they look on the "screens"
+    # layer). Its filter box starts empty each time.
+
+    # The list is built as far as it is scrolled (DECISIONS 2026-11-26
+    # "Instant windows"): 0.35 s to open on Being a DIK with all 200 rows.
+    URMFL_ROWS = _URMKRows("flags", 40, 200)
+
+    def urmfl_open():
+        if renpy.has_screen("urmfl_flags"):
+            urmk_old_input("flags", fresh=True)
+            URMFL_ROWS.top()
+            renpy.show_screen("urmfl_flags", _layer=_urmi_layer)
+            renpy.restart_interaction()
+
+    def urmfl_close():
+        if renpy.get_screen("urmfl_flags", layer=_urmi_layer) is not None:
+            renpy.hide_screen("urmfl_flags", layer=_urmi_layer)
+            renpy.restart_interaction()
+
+    # ---- the URM+ menu (the registry, 01_urm_door): only in a game that
+    # keeps choices as words
+
+    def _urmfl_shown():
+        return urmfl_has() and renpy.has_screen("urmfl_flags")
+
+    def _urmfl_count():
+        return u"%d" % len(_urmfl_index().flags)
+
+    _urm_entry_add("flags", "Flags", u"\ue153", lambda: urmfl_open(),
+                   count=_urmfl_count, shown=_urmfl_shown, group=1, order=20)
 
 

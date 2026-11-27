@@ -13,111 +13,36 @@
     # Everything here is plain data (boxes, bars, lines of text); the screen
     # only draws it. Built once when opened, never per frame.
 
-    try:
-        x52URM.SettingsClass.defaultValues.setdefault("urmcBtnRouteMap", True)
-    except Exception as error:
-        print("URM+: route map setting not registered (%s)" % (error,))
-
-    _URMM_HUMAN = _urmm_re.compile(
-        r"^([A-Za-z_][\w.]*)\s*(\+=|-=|\*=|/=|=)\s*(.+)$")
-    _URMM_NUMBER = _urmm_re.compile(r"^-?\d+(\.\d+)?$")
-
     def urm_map_esc(text):
         """For text drawn with substitute False: only text tags need escaping."""
         return (u"%s" % (text,)).replace("{", "{{")
 
-    def _urmm_pretty(name):
-        """carol_love -> Carol love; persistent.seen_end -> Seen end."""
+    # ---- the map's look: our screen look (the user's pick 1a, 2026-11-22)
 
-        if name.startswith("persistent."):
-            name = name[len("persistent."):]
-        if name.startswith("store."):
-            name = name[len("store."):]
-        text = name.replace("_", " ").replace(".", " ").strip()
-        return text[:1].upper() + text[1:]
-
-    def _urmm_value(text):
-        """A literal as a player would say it: "yes" -> yes, True -> on."""
-
-        text = text.strip()
-        if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
-            return text[1:-1]
-        if text == "True":
-            return "on"
-        if text == "False":
-            return "off"
-        if text == "None":
-            return "cleared"
-        return text
-
-    def urm_map_chip(text):
-        """
-        One change as (words, tone). tone is gain, loss, set or other, and
-        decides the chip's colour - so "better or worse" reads without
-        reading.
-        """
-
-        m = _URMM_HUMAN.match(text.strip())
-        if not m:
-            return (_urm_clip(text.strip(), 40), "other")
-
-        name, op, value = m.group(1), m.group(2), m.group(3).strip()
-        who = _urmm_pretty(name)
-        number = _URMM_NUMBER.match(value) is not None
-        negative = number and value.startswith("-")
-
-        if op == "+=":
-            if number:
-                return ("%s %s%s" % (who, "" if negative else "+", value),
-                        "loss" if negative else "gain")
-            return ("%s + %s" % (who, _urm_clip(value, 16)), "other")
-
-        if op == "-=":
-            if number:
-                return ("%s %s" % (who, value[1:] if negative else "-" + value),
-                        "gain" if negative else "loss")
-            return ("%s - %s" % (who, _urm_clip(value, 16)), "other")
-
-        if op in ("*=", "/="):
-            return ("%s %s%s" % (who, "x" if op == "*=" else "/",
-                                 _urm_clip(value, 12)), "other")
-
-        said = _urmm_value(value)
-        if value == "True":
-            return ("%s: on" % who, "gain")
-        if value == "False":
-            return ("%s: off" % who, "loss")
-        return ("%s: %s" % (who, _urm_clip(said, 20)), "set")
-
-    def _urmm_now(name):
-        """The variable's value right now, or a marker when it has none."""
-
-        try:
-            obj = renpy.store
-            parts = name.split(".")
-            if parts[0] == "persistent":
-                obj = persistent
-                parts = parts[1:]
-            for part in parts:
-                obj = getattr(obj, part)
-            return True, obj
-        except BaseException:
-            return False, None
-
-    _URMM_SAY_OP = python_dict((
-        ("==", "is"), ("!=", "is not"), (">=", "is at least"),
-        (">", "is over"), ("<=", "is at most"), ("<", "is under"),
+    _URMM_INK = python_dict((
+        ("screen", "surface"), ("ink", "ink"), ("muted", "ink-muted"),
+        ("line", "graph-line"), ("accent", "accent"), ("accent-ink", "accent-ink"),
+        ("on-accent", "on-accent"), ("box", "surface"), ("game", "surface-2"),
+        ("track", "track"), ("thumb", "thumb"), ("thumbHover", "thumb-hover"),
+        ("pick", "warn-ink"), ("lines", "ink-muted"),
     ))
+    def urm_map_ink(token):
+        """The route map's colours from the shared palette."""
+        return urmk_colour(_URMM_INK.get(token, token))
 
-    def urm_map_later_line(name, op, literal, where):
-        """'At ch04begin the game checks: Carol nerve is at least 3 · you have 1'."""
+    def urm_map_later_parts(name, op, literal, where):
+        """A later check as the map's footer shows it: (words, what the
+        player has, its tone) - 'At ch04begin the game checks: Carol nerve
+        is at least 3', 'you have 1, needs 3', 'warn'. The tone says how
+        it stands now: met (gain), not met or not set yet (warn), not to be
+        told (plain)."""
 
         who = _urmm_pretty(name)
 
         if op == "truthy":
-            test = "%s is on" % who
+            test = "%s is true" % who
         elif op == "falsy":
-            test = "%s is off" % who
+            test = "%s is false" % who
         elif op in ("in", "not in"):
             test = "%s %s %s" % (who, "has" if op == "in" else "lacks",
                                  _urmm_value(_urmm_show(literal)))
@@ -127,24 +52,43 @@
             test = "%s %s %s" % (who, _URMM_SAY_OP.get(op, op),
                                  _urmm_value(_urmm_show(literal)))
 
-        known, now = _urmm_now(name)
+        known, now = _urm_now(name)
         if not known:
             have = "not set yet"
         elif now is True:
-            have = "it is on"
+            have = "it is true"
         elif now is False:
-            have = "it is off"
+            have = "it is false"
         else:
-            have = "you have %s" % _urmm_value(_urmm_show(now))
-            try:
-                if op in (">=", ">") and not isinstance(now, bool):
-                    gap = literal - now + (1 if op == ">" else 0)
-                    if gap > 0:
-                        have += " (%s short)" % gap
-            except Exception:
-                pass
+            have = (urm_goal(name, op, literal) if now is not None else None) or \
+                "you have %s" % _urmm_value(_urmm_show(now))
 
-        return "At %s the game checks: %s  ·  %s" % (where, test, have)
+        tone = "loss" if not known else _urmm_later_tone(now, op, literal)
+        return ("At %s the game checks: %s" % (where, test), have, tone)
+
+    _URMM_LATER_TESTS = python_dict((
+        ("==", lambda a, b: a == b), ("!=", lambda a, b: a != b),
+        (">=", lambda a, b: a >= b), (">", lambda a, b: a > b),
+        ("<=", lambda a, b: a <= b), ("<", lambda a, b: a < b),
+        ("in", lambda a, b: b in a), ("not in", lambda a, b: b not in a),
+        ("truthy", lambda a, b: bool(a)), ("falsy", lambda a, b: not a),
+    ))
+
+    def _urmm_later_tone(now, op, literal):
+        test = _URMM_LATER_TESTS.get(op)
+        if test is None:
+            return "plain"
+        try:
+            return "gain" if test(now, literal) else "loss"
+        except Exception:
+            return "plain"
+
+    def urm_map_later_line(name, op, literal, where):
+        """'At ch04begin the game checks: Carol nerve is at least 3 · you
+        have 1, needs 3' - a number test says it as a goal (urm_goal)."""
+
+        words, have, _tone = urm_map_later_parts(name, op, literal, where)
+        return "%s  ·  %s" % (words, have)
 
     # ---- finding the menu to draw
 
@@ -268,6 +212,7 @@
             self.width = 0
             self.height = 0
             self.later = python_list()
+            self.later_rows = python_list()   # (words, have, tone) for each later line
 
     _URMM_MAP_CHIPS = 6
 
@@ -282,7 +227,8 @@
         """
         Whether the checks in front of a row hold as the game stands: True,
         False, or None when that cannot be said. A test with a call in it is
-        never run - a call can do anything - and counts as cannot be said.
+        never run - a call can do anything - and counts as cannot be said
+        (_urm_truth, the one answer every display gives).
         An elif is reached only when the tests before it fail (.before); an
         "otherwise" carries exactly those. One test known to fail settles
         it, whatever the others are.
@@ -295,11 +241,7 @@
             for cond, wanted in tests:
                 if wanted is None:
                     continue
-                text = u"%s" % (cond,)
-                if "(" in text:
-                    sure = False
-                    continue
-                now = _urm_truth(text)
+                now = _urm_truth(cond)
                 if now is None:
                     sure = False
                 elif now != bool(wanted):
@@ -356,6 +298,7 @@
                 box.checks.append(text)
 
         dyn_said = python_set()
+        changes_said = python_set()
         for guards, text, count in _urm_reduce(python_list(records))[0]:
             if text == _URMM_MARK_CHECK:
                 continue
@@ -365,15 +308,27 @@
                 if ("menu", None) not in box.badges:
                     box.badges.append(("menu", None))
                 continue
-            if text == _URMM_MARK_CODE:
-                # One "?" however many such statements the stretch holds.
+            if text.startswith("persistent."):
+                continue
+            chip = None if text == _URMM_MARK_CODE else urm_any_chip(text)
+            if text == _URMM_MARK_CODE or chip == _URMM_CODE_CHIP:
+                # One "?" however many such statements the stretch holds,
+                # and lines of the game's own code whose writes cannot be
+                # told (34_words).
                 if ("code", _URMM_CODE_TIP) not in box.badges:
                     box.badges.append(("code", _URMM_CODE_TIP))
                 continue
-            if text.startswith("persistent."):
-                continue
-            words, tone = urm_any_chip(text)
-            if count > 1:
+            if chip is None:
+                continue            # it changes nothing of the story
+            words, tone = chip
+            if _urmm_says_no_amount(chip):
+                # What a line changes, with no amount: said once behind
+                # the same checks (each check keeps its own diamond).
+                said = (words, tuple(guards))
+                if said in changes_said:
+                    continue
+                changes_said.add(said)
+            elif count > 1:
                 words += "  x%d" % count
             # A jump that cannot be followed is always said, never "+1 more".
             if (len(box.chips) >= _URMM_MAP_CHIPS

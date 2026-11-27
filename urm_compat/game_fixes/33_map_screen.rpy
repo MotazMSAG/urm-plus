@@ -103,7 +103,7 @@
         for a spot (words, x, y, w, h in the map's own coordinates), in the
         coordinates of the part of the map in view."""
 
-        s = x52URM.scalePxInt
+        s = urmk_px_cut
         words, x, y, w, h = tip
         vw, vh = shown
         top = (max(view.height, vh) - view.height) // 2
@@ -140,14 +140,16 @@
         """
 
         try:
-            s = x52URM.scalePxInt
+            s = urmk_px_cut
             words, bx, by, bw, bh, room = urm_map_bubble_at(
                 tip, view, xadj.value, yadj.value, shown)
             out = Fixed(xysize=shown)
-            out.add(Solid(urm_map_colour("merge"), xysize=(bw, bh), xpos=bx, ypos=by))
+            back = urmk_back("bubble")
+            out.add(Fixed(back.image, xpos=bx - back.left, ypos=by - back.top,
+                          xysize=(bw + back.left + back.right, bh + back.top + back.bottom)))
             inner = Fixed(xysize=room, xpos=bx + s(_URMM_TIP_PAD[0]), ypos=by + s(_URMM_TIP_PAD[1]))
-            inner.add(Text(urm_map_esc(words), style="x52URM_text", size=s(_URMM_TIP_SIZE),
-                           color=urm_map_colour("inkOnPrimary"), substitute=False))
+            inner.add(Text(urm_map_esc(words), style="urmk_text", size=s(_URMM_TIP_SIZE),
+                           color=urm_map_ink("ink"), substitute=False))
             out.add(inner)
             return out, 0.1
         except Exception:
@@ -190,92 +192,57 @@
                     dist = _urmm_distances(split[2], _urmsg_sites(split[3]))
                     seen = python_set()
                     for name, _t, where, op, lit in _urmm_later(split[2], names, index, dist):
-                        line = urm_map_later_line(name, op, lit, where)
+                        parts = urm_map_later_parts(name, op, lit, where)
+                        line = "%s  ·  %s" % parts[:2]
                         if line not in seen:
                             seen.add(line)
                             view.later.append(line)
+                            view.later_rows.append(parts)
         except BaseException as error:
             view = _URMMView()
             view.empty = "The map could not be drawn here (%s)." % (error,)
 
         return view
 
-    def urm_map_diamond(size, edge="gain", fill="screenSolid"):
-        """A small outlined diamond, drawn - the icon fonts have none."""
-        b = max(1, size // 7)
-        return Transform(Fixed(
-            Solid(urm_map_colour(edge), xysize=(size, size)),
-            Solid(urm_map_colour(fill), xysize=(size - 2 * b, size - 2 * b), xpos=b, ypos=b),
-            xysize=(size, size)), rotate=45)
+    def urm_map_later_view(view):
+        """The footer's rows: (words, what the player has, its tone)."""
 
-    def urm_map_fade(faded):
-        """What a row of chips is drawn through: faded when its check fails
-        as the game stands. And a way's box: faded when the game will not
-        take that way as things stand (_URMMBox.faded). Every row and box
-        goes through one of the two, so the screen has one shape of each;
-        made once, when first asked for."""
+        rows = getattr(view, "later_rows", None)
+        if rows and len(rows) == len(view.later):
+            return rows
+        return [(line, None, "plain") for line in view.later]
 
-        made = getattr(_urmm_st, "fades", None)
-        if made is None:
-            made = _urmm_st.fades = (Transform(), Transform(alpha=0.4))
-        return made[1 if faded else 0]
+    def urm_map_mark(size, colour):
+        """A filled diamond: 'pick' (the game picks the way) or 'lines'
+        (only lines change)."""
+
+        return Transform(Solid(urm_map_ink(colour), xysize=(size, size)), rotate=45)
 
     # ---- the screen's side
 
     def urm_map_view():
         return getattr(_urmm_st, "view", None) or _URMMView()
 
+    def urm_map_ready():
+        """Whether the route map can open: its screen is ours
+        (game/urmplus.rpa)."""
+        return renpy.has_screen("urm_route_map")
+
     def urm_map_open(source=None):
         # source says which button asked (the quickmenu, a notification
-        # header, the hotkey); the map is the same from all of them.
+        # header, the hotkey); the map is the same from all of them. It
+        # opens on our layer.
+        if not urm_map_ready():
+            return
         _urmm_st.view = urm_map_build()
-        try:
-            layer = _urmi_layer
-        except Exception:
-            layer = "x52Overlay" if "x52Overlay" in config.layers else "overlay"
-        renpy.show_screen("urm_route_map", _layer=layer)
+        renpy.show_screen("urm_route_map", _layer=_urmi_layer)
         renpy.restart_interaction()
 
     def urm_map_close():
-        for layer in python_list(config.layers) + python_list(getattr(config, "top_layers", ())):
-            try:
-                if renpy.get_screen("urm_route_map", layer=layer) is not None:
-                    renpy.hide_screen("urm_route_map", layer=layer)
-            except Exception:
-                continue
+        if renpy.get_screen("urm_route_map", layer=_urmi_layer) is not None:
+            renpy.hide_screen("urm_route_map", layer=_urmi_layer)
         _urmm_st.view = None
         renpy.restart_interaction()
-
-    def urm_map_colour(key):
-        """Theme colours for the map, so it follows URM's theme."""
-
-        try:
-            t = x52URM.Theme
-            c = t.colors
-            table = python_dict((
-                ("gain", t.primary),
-                ("plain", t.colorAlpha(t.text, 0.3)),
-                ("box", c.buttonBgHover),
-                ("root", t.primary),
-                ("merge", t.primary),
-                ("ink", t.text),
-                ("inkOnPrimary", t.background),
-                ("muted", t.colorAlpha(t.text, 0.7)),
-                ("gainBg", c.successBg), ("gainText", c.successText),
-                # "You are in a part others may not see": amber, the one
-                # tone URM's themes have no colour for.
-                ("warnBg", "#fff4ce"), ("warnText", "#6b5a00"),
-                ("lossBg", c.errorBg), ("lossText", c.errorText),
-                ("setBg", t.secondary), ("setText", t.text),
-                ("otherBg", c.buttonBg), ("otherText", t.text),
-                ("screen", t.colorAlpha(t.background, 0.96)),
-                ("screenSolid", t.background),
-                ("pill", t.background), ("pillText", t.primary),
-                ("bar", c.buttonBg),
-            ))
-            return table.get(key) or t.text
-        except Exception:
-            return "#888888"
 
     def _urmm_outline(menu, blocks):
         """
@@ -370,21 +337,27 @@
             return python_list()
         return out
 
-    def _urmm_current_menu():
-        try:
-            node = _urmsg_here()
-            if isinstance(node, renpy.ast.Menu):
-                return node
-        except BaseException:
-            pass
-        return None
+    def urm_maze_for(choices, menu=None):
+        """The walked arms for the menu on screen, cached by menu. menu: a
+        Menu statement a few lines ahead instead (_urmm_ahead), reached
+        through the calls the game is inside now."""
 
-    def urm_maze_for(choices):
-        """The walked arms for the menu on screen, cached by menu."""
+        # The choice the worker is walking ahead came before its walk ended
+        # (the player clicked on fast): that walk is finished now, from where
+        # it is, and its answer is taken from the memory below.
+        if (menu is None and _urm_menu_here() is getattr(_urmm_st, "ahead", None)
+                and _urm_work_state("corner card ahead") in ("waiting", "running")):
+            _urm_work_finish("corner card ahead")
+        return _urmsg_drain(_urmm_maze_steps(choices, menu))
+
+    def _urmm_maze_steps(choices, menu=None):
+        """urm_maze_for in steps: the worker walks the choice ahead with it
+        (_urmm_ahead_steps), no step long on a frame."""
 
         blocks = [_urm_choice_nodes(c) for c in choices]
         if not blocks or any(b is None for b in blocks):
-            return None
+            yield _URMSGDone(None)
+            return
 
         # What was walked under another script is not this script's.
         gen = _urmsg_gen()
@@ -395,7 +368,8 @@
         # The menu on screen is where the game is: its ways are walked with
         # the calls the game is inside (idea 7), and the answer is kept for
         # that menu reached through those calls.
-        menu = _urmm_current_menu()
+        if menu is None:
+            menu = _urm_menu_here()
         frames = _urmsg_frames(_urmsg_live_stack()) if menu is not None else python_list()
         sites = _urmsg_sites(frames)
 
@@ -403,13 +377,30 @@
         hit = _urmm_st.cache.get(key)
 
         if hit is None:
-            plan = _urmm_plan(menu, blocks, sites)
+            plan = None
+            for _said in _urmsg_plan_steps(menu, blocks, _URMM_REACH, sites):
+                if isinstance(_said, _URMSGDone):
+                    plan = _said.result
+                    break
+                yield _said
             if plan is None:
-                return None
+                yield _URMSGDone(None)
+                return
             met = python_list()
-            arms = _urmm_arms(menu, blocks, plan, frames, met)
+            arms = None
+            for _said in _urmm_arms_steps(menu, blocks, plan, frames, met):
+                if isinstance(_said, _URMSGDone):
+                    arms = _said.result
+                    break
+                yield _said
             if arms is None:
-                return None
+                yield _URMSGDone(None)
+                return
+            # the walk may have paused: what another reader kept meanwhile
+            # under this key is as good, and is kept
+            if _urmm_st.cache.get(key) is not None:
+                hit = _urmm_st.cache[key]
+        if hit is None:
             if len(_urmm_st.cache) > 64:
                 _urmm_st.cache.clear()
             hit = python_list([arms, plan[1], None])
@@ -430,7 +421,8 @@
                 index = None
             if index is not None and index.state == "ready":
                 try:
-                    dist = _urmm_distances(hit[1], _urmm_st.cache.get(("after",) + key) or ())
+                    dist, cut, ahead = _urmm_reach_later(
+                        hit[1], _urmm_st.cache.get(("after",) + key) or ())
                     names = python_list()
                     for arm in hit[0]:
                         _urmm_names(arm, names)
@@ -441,8 +433,69 @@
                         for arm in hit[0])
                     hit[2] = rows
                     hit.append(found)
+                    # What can run later, for urm_choice_costs - none when
+                    # the search was cut short: a check further on would
+                    # read as never made.
+                    hit.append(None if cut else dist)
+                    hit.append(None if cut else _urmm_code_reads(ahead))
                 except BaseException:
                     pass
 
-        return hit
+        yield _URMSGDone(hit)
+
+    # ---- ahead of the player (the speed plan, step 6): the menu a few lines
+    # on is walked while its lines are read, so the corner card finds it
+    # ready when the menu comes (it was walked when the menu came: up to
+    # 1.3 s on Being a DIK, FINDINGS "Where URM+ freezes").
+
+    _URMM_AHEAD = 40         # statements looked through for the next menu
+
+    def _urmm_next_menu_ahead(node):
+        """The Menu statement a straight run of lines from node leads to,
+        or None: stops at a jump, a call, a return, a check or a menu's
+        end, where the way on is not the next line or the calls change."""
+
+        steps = 0
+        while node is not None and steps < _URMM_AHEAD:
+            kind = _urmsg_kind(node)
+            if kind == _URMSG_K_MENU:
+                return node
+            if kind >= _URMSG_K_RET or kind == _URMSG_K_USER:
+                return None     # a return, jump, call, check, loop, python or a game's own
+                                # statement (either may jump): not a straight run
+            node = getattr(node, "next", None)
+            steps += 1
+        return None
+
+    def _urmm_ahead_steps(menu):
+        """The worker's walk of the choice ahead: urm_maze_for in steps."""
+
+        for said in _urmm_maze_steps(_urm_choices_of(menu), menu):
+            if isinstance(said, _URMSGDone):
+                break
+            yield said
+        yield _URMWorkDone()
+
+    def _urmm_ahead_interact():
+        """config.interact_callbacks: hand the worker the next menu's walk."""
+
+        try:
+            if not _urm_in_game() or not _urm_setting("showChoicesNotification"):
+                return
+            here = _urmsg_here()
+            if here is None or _urmsg_kind(here) == _URMSG_K_MENU:
+                return
+            menu = _urmm_next_menu_ahead(getattr(here, "next", None))
+            if menu is None or getattr(_urmm_st, "ahead", None) is menu:
+                return
+            _urmm_st.ahead = menu
+            _urm_work_slices("corner card ahead", lambda: _urmm_ahead_steps(menu))
+        except Exception:
+            pass
+
+    try:
+        if _urmm_ahead_interact not in config.interact_callbacks:
+            config.interact_callbacks.append(_urmm_ahead_interact)
+    except Exception as error:
+        print("MRM: the corner card is not worked out ahead (%s)" % (error,))
 

@@ -627,7 +627,7 @@ init 999 python:
                 try:
                     self._flags()
                 except Exception as error:
-                    print("URM+: flags not indexed (%s)" % (error,))
+                    print("MRM: flags not indexed (%s)" % (error,))
 
                 total = 0
                 for bucket in self.reads.values():
@@ -857,7 +857,7 @@ init 999 python:
 
     def _urmi_index():
         """The live index, or None before it has been started."""
-        return getattr(x52URM.Var, "_urmcIndex", None)
+        return getattr(_URMMemory, "index", None)
 
 # ---------------------------------------------------------------------------
 # Building the index as the game starts, and saying so
@@ -883,17 +883,17 @@ init 999 python:
     def _urmi_start():
 
         try:
-            generation = int(getattr(x52URM.Var, "_urmcIndexGeneration", 0)) + 1
+            generation = int(getattr(_URMMemory, "index_generation", 0)) + 1
         except Exception:
             generation = 1
 
         index = _URMIndex()
-        x52URM.Var._urmcIndexGeneration = generation
-        x52URM.Var._urmcIndex = index
+        _URMMemory.index_generation = generation
+        _URMMemory.index = index
         stmts = _urmi_all_stmts()
 
         def alive():
-            return getattr(x52URM.Var, "_urmcIndexGeneration", generation) == generation
+            return getattr(_URMMemory, "index_generation", generation) == generation
 
         def run():
             index.build(stmts, generation, alive)
@@ -909,7 +909,7 @@ init 999 python:
     try:
         _urmi_start()
     except Exception as error:
-        print("URM+: script index not started (%s)" % (error,))
+        print("MRM: script index not started (%s)" % (error,))
 
 
     # ------------------------------------------------------------------
@@ -956,7 +956,8 @@ init 999 python:
         return (Text(message, size=16, color="#ffffffdd",
                      outlines=((2, "#000000aa", 0, 0),)), again)
 
-    _urmi_layer = "x52Overlay" if "x52Overlay" in config.layers else "overlay"
+    # Our screens' layer: URM's, or without URM our own (00_urm_fixes).
+    _urmi_layer = _urm_own_layer
 
     def _urmi_interact():
         """Show the corner line in this context if there is anything to say."""
@@ -1084,7 +1085,7 @@ init 999 python:
         parts.append("found in %d check%s in the script"
                      % (gates, "" if gates == 1 else "s"))
         if truthy:
-            parts.append("%d as on/off" % truthy)
+            parts.append("%d as true/false" % truthy)
         if rivals:
             parts.append("%d against another variable" % rivals)
         if mentions:
@@ -1136,7 +1137,7 @@ init 999 python:
         rows = python_list()
         for site, op, literal in reads[:limit]:
             if op in ("truthy", "falsy"):
-                rows.append(_urmi_describe(index, site, "is on" if op == "truthy" else "is off", None, False))
+                rows.append(_urmi_describe(index, site, "is true" if op == "truthy" else "is false", None, False))
             elif op == "vs":
                 rows.append(_urmi_describe(index, site, "compared with", literal, False))
             elif op == "mention":
@@ -1179,23 +1180,3 @@ init 999 python:
 
         return ("ready", None, _urmi_safe(summary), safe_checks,
                 wcount, safe_writers, rcount)
-
-    def urmi_fill(var, valueInput, value):
-        """Put one of the game's own values into the editor - not commit it."""
-
-        if getattr(var, "isFlag", False):
-            # A flag has no value box: Set ON / Set OFF switch it directly.
-            urmfl_set(var.name, bool(value))
-            return
-
-        try:
-            if var.varType == "boolean":
-                SetScreenVariable("newValue", bool(value))()
-            elif isinstance(value, _urmi_text):
-                valueInput.set_text(value)
-            else:
-                valueInput.set_text(str(value))
-        except Exception:
-            pass
-
-

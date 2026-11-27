@@ -47,9 +47,8 @@ init 999 python:
         r"galler|replay|memor|album|recollect|bonus|extra|(?:^|_)cgs?(?:$|_)"
         r"|scene_?(?:select|list|menu|room|viewer)", _urmg_re.I)
     _URMG_LABELS = _urmg_re.compile(r"galler|replay|memor|album|recollect|bonus|extras", _urmg_re.I)
-    # Thief of Hearts 2 shows scr_end_replay during a replay; counting it would
-    # unlock flags inside the replayed scene itself. URM's own URM_replay
-    # dialogs are not the game's gallery either.
+    # A replay's end control is visible inside a replay. Exclude that and
+    # mod dialogs from gallery detection.
     _URMG_NOT_SCREENS = _urmg_re.compile(r"end_?replay|replay_?end|exit|^urm", _urmg_re.I)
     _URMG_PERSISTENT = _urmg_re.compile(r"persistent\.([A-Za-z_]\w*)")
 
@@ -62,11 +61,8 @@ init 999 python:
     except ImportError:
         _urmg_strings = (str,)
 
-    try:
-        x52URM.SettingsClass.defaultValues.setdefault("urmcGalleryAll", False)
-        x52URM.SettingsClass.defaultValues.setdefault("urmcGalleryBadge", True)
-    except Exception as error:
-        print("URM+: gallery settings not registered (%s)" % (error,))
+    _urm_setting_add("urmcGalleryAll", False)
+    _urm_setting_add("urmcGalleryBadge", True)
 
     class _URMGState(python_object):
         def __init__(self):
@@ -80,18 +76,10 @@ init 999 python:
             self.scanned = False
 
     def _urmg_state():
-        holder = x52URM.Var
-        st = getattr(holder, "_urmgState", None)
-        if st is None:
-            st = _URMGState()
-            holder._urmgState = st
-        return st
+        return _urm_kept("gallery", _URMGState)
 
     def _urmg_setting(name):
-        try:
-            return x52URM.Settings.get(name)
-        except Exception:
-            return None
+        return _urm_setting(name)
 
 
     # ------------------------------------------------------------------
@@ -152,8 +140,7 @@ init 999 python:
         The value that means "unlocked" for one persistent flag.
 
         Most galleries test `if persistent.x:` and the scene sets it True, but
-        Thief of Hearts 2 tests `persistent.replay_x == False` and its scenes
-        set False (True is written at startup, meaning locked). So the value
+        some games test for False and set True at startup to mean locked. So the value
         is learnt from what the story itself writes when the scene is earned -
         writes outside init code - and True is only the fallback for a flag
         the script never writes.
@@ -419,7 +406,7 @@ init 999 python:
                         if check is not None and not hasattr(check, "_urmg_original"):
                             cls.check_unlock = _urmg_check_wrapper(check)
         except Exception as error:
-            print("URM+: Gallery class left as is (%s)" % (error,))
+            print("MRM: Gallery class left as is (%s)" % (error,))
 
         for name in python_list(names):
             if name.startswith("_") or "urm" in name.lower():
@@ -454,7 +441,7 @@ init 999 python:
         try:
             type(renpy.game.persistent).__getattribute__ = _urmg_getattribute
         except Exception as error:
-            print("URM+: persistent gallery flags not unlocked (%s)" % (error,))
+            print("MRM: persistent gallery flags not unlocked (%s)" % (error,))
         for mod in _urmg_modules():
             for fname in ("seen_label", "seen_image", "seen_audio"):
                 current = getattr(mod, fname, None)
@@ -488,16 +475,16 @@ init 999 python:
 
     def urmg_toggle():
         try:
-            x52URM.Settings.set("urmcGalleryAll", not _urmg_setting("urmcGalleryAll"))
+            _urm_setting_set("urmcGalleryAll", not _urmg_setting("urmcGalleryAll"))
         except Exception as error:
-            print("URM+: gallery switch failed (%s)" % (error,))
+            print("MRM: gallery switch failed (%s)" % (error,))
         _urmg_apply()
         renpy.restart_interaction()
 
     def urmg_badge_text():
         if _urmg_state().on:
-            return "{urm_notl}URM gallery: {b}everything unlocked{/b}{/urm_notl}"
-        return "{urm_notl}URM gallery: my unlocks{/urm_notl}"
+            return "URM gallery: {b}everything unlocked{/b}"
+        return "URM gallery: my unlocks"
 
     def _urmg_interact():
         try:
@@ -525,5 +512,18 @@ init 999 python:
 
     if _urmg_interact not in config.interact_callbacks:
         config.interact_callbacks.append(_urmg_interact)
+
+    # ---- the URM+ menu and settings page (the registry, 01_urm_door)
+
+    # Gallery: unlock all is kept in Settings and the menu badge.
+    _urm_row_add("gallery_all", "game", "Gallery",
+                 "Unlock all opens every scene and replay in the game's gallery. "
+                 "Nothing is written, so switching back is exact.",
+                 (("My unlocks", False), ("Unlock all", True)),
+                 setting="urmcGalleryAll", order=20)
+    _urm_row_add("gallery_badge", "game", "Gallery switch in menus",
+                 "A small button in the corner of the main menu and game menu.",
+                 (("Show", True), ("Hide", False)),
+                 setting="urmcGalleryBadge", order=30)
 
 

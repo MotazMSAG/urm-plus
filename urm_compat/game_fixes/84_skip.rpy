@@ -27,19 +27,13 @@ init 999 python:
 
     import sys as _urms_sys
 
-    try:
-        x52URM.SettingsClass.defaultValues.setdefault("urmcSkipTyposStrict", False)
-        x52URM.SettingsClass.defaultValues.setdefault("urmcSkipTypos", 3)
-    except Exception as error:
-        print("URM+: skip-past-small-changes setting not registered (%s)" % (error,))
+    _urm_setting_add("urmcSkipTyposStrict", False)
+    _urm_setting_add("urmcSkipTypos", 3)
 
     _URMS_WALK = 400
 
     def _urms_limit():
-        try:
-            value = x52URM.Settings.get("urmcSkipTypos")
-        except Exception:
-            value = None
+        value = _urm_setting("urmcSkipTypos")
         if value is None:
             return 3
         try:
@@ -60,13 +54,10 @@ init 999 python:
 
     def _urms_truth(cond):
         """Whether a condition holds now: True, False, or None when it
-        cannot be evaluated."""
+        cannot be told - the one answer every display gives (13_now). Kept
+        as the look-ahead's own name: the tests put stand-ins in its place."""
 
-        try:
-            taken = renpy.python.py_eval(cond)
-        except Exception:
-            return None
-        return bool(taken)
+        return _urm_truth(cond)
 
     def _urms_next(node):
         """The statement that runs after `node`, or None where it cannot be told."""
@@ -77,6 +68,25 @@ init 999 python:
         """The dialogue line a statement is, or None."""
 
         return node if isinstance(node, renpy.ast.Say) else None
+
+    # A player of a translation is on a line of that language, and the
+    # engine marks THAT line seen. The rule walks the original script (the
+    # one the story graph knows): it starts from the original of the line
+    # played, and a line counts as seen when it or its line in the language
+    # being played was seen.
+
+    def _urms_here(current):
+        """The statement of the original script the game is on."""
+
+        return _urmsg_default_twin(_urms_lookup(current))
+
+    def _urms_seen(line, seen):
+        if _urm_was_seen(line.name, seen):
+            return True
+        for twin in _urmsg_played_twins(line):
+            if _urm_was_seen(twin.name, seen):
+                return True
+        return False
 
     # Statements a line can sit next to without leaving its passage.
     def _urms_passes(node):
@@ -132,7 +142,7 @@ init 999 python:
             if not says:
                 return False
             for say in says:
-                if _urm_was_seen(say.name, seen):
+                if _urms_seen(say, seen):
                     return False
 
         # Seen dialogue before the construct, in its passage.
@@ -142,7 +152,7 @@ init 999 python:
             steps += 1
             line = _urms_line(walk)
             if line is not None:
-                return _urm_was_seen(line.name, seen)
+                return _urms_seen(line, seen)
             if not _urms_passes(walk):
                 return False
             walk = _urms_back(index, walk)
@@ -183,11 +193,7 @@ init 999 python:
             self.after_seen = False  # a seen line came before them
 
     def _urms_run():
-        run = getattr(x52URM.Var, "_urmsRun", None)
-        if run is None:
-            run = _URMSRun()
-            x52URM.Var._urmsRun = run
-        return run
+        return _urm_kept("skip_run", _URMSRun)
 
     def _urms_note_line(node):
         """Called as each dialogue line starts: count it in the current run."""
@@ -223,7 +229,7 @@ init 999 python:
             _urms_execute._urms = True
             renpy.ast.Say.execute = _urms_execute
     except Exception as error:
-        print("URM+: dialogue is not followed for skipping (%s)" % (error,))
+        print("MRM: dialogue is not followed for skipping (%s)" % (error,))
 
     if _urms_forget_run not in config.after_load_callbacks:
         config.after_load_callbacks.append(_urms_forget_run)
@@ -236,7 +242,7 @@ init 999 python:
         while walk is not None and steps < _URMS_WALK:
             steps += 1
             if isinstance(walk, renpy.ast.Say):
-                if _urm_was_seen(walk.name, seen):
+                if _urms_seen(walk, seen):
                     return True
                 unseen += 1
                 if unseen > limit:
@@ -253,7 +259,7 @@ init 999 python:
         run = _urms_run()
         if not run.after_seen or run.unseen < 1 or run.unseen > limit:
             return False
-        node = _urms_lookup(current)
+        node = _urms_here(current)
         if not isinstance(node, renpy.ast.Say):
             return False
         return _urms_ahead(node, run.unseen, limit, renpy.game.persistent._seen_ever)
@@ -281,16 +287,16 @@ init 999 python:
         if index is None or index.state != "ready" or not getattr(index, "prev", None):
             return False
 
-        cache = getattr(x52URM.Var, "_urmsCache", None)
+        cache = getattr(_URMMemory, "skip_cache", None)
         if cache is None or len(cache) > 500:
             cache = python_dict()
-            x52URM.Var._urmsCache = cache
-        key = (current, limit)
+            _URMMemory.skip_cache = cache
+        key = (current, limit, getattr(renpy.game.preferences, "language", None))
         if key in cache:
             return cache[key]
 
         result = False
-        node = _urms_lookup(current)
+        node = _urms_here(current)
         seen = renpy.game.persistent._seen_ever
         if isinstance(node, renpy.ast.Say):
             unseen = 1
@@ -306,7 +312,7 @@ init 999 python:
                 steps += 1
                 line = _urms_line(walk)
                 if line is not None:
-                    if _urm_was_seen(line.name, seen):
+                    if _urms_seen(line, seen):
                         before = True
                         break
                     unseen += 1
@@ -329,7 +335,7 @@ init 999 python:
                 while walk is not None and steps < _URMS_WALK:
                     steps += 1
                     if isinstance(walk, renpy.ast.Say):
-                        if _urm_was_seen(walk.name, seen):
+                        if _urms_seen(walk, seen):
                             result = before or _urms_block(index, walk) == block or \
                                 _urms_changed_construct(index, first, seen, limit)
                             break
@@ -356,7 +362,7 @@ init 999 python:
             if limit <= 0:
                 return False
             try:
-                if x52URM.Settings.get("urmcSkipTyposStrict"):
+                if _urm_setting("urmcSkipTyposStrict"):
                     return _urms_small_change(self.current, limit)
                 return _urms_played_between(self.current, limit)
             except Exception:
@@ -366,6 +372,32 @@ init 999 python:
             _urms_seen_current._urms = True
             _urms_context.seen_current = _urms_seen_current
     except Exception as error:
-        print("URM+: skipping still stops on small changes (%s)" % (error,))
+        print("MRM: skipping still stops on small changes (%s)" % (error,))
+
+    # ---- the URM+ menu and settings page (the registry, 01_urm_door)
+
+    def _urms_unseen():
+        return bool(_preferences.skip_unseen)
+
+    def _urms_unseen_flip():
+        _preferences.skip_unseen = not _preferences.skip_unseen
+
+    def _urms_unseen_put(on):
+        _preferences.skip_unseen = bool(on)
+
+    # The engine keeps "skip unseen text" for this game alone: its row has
+    # no all-games level. Removed from URM+ menu (available in Settings and Quick access).
+    _urm_row_add("skip_small_changes", "skipping", "Skip past small changes",
+                 "When an update rewords lines you have read, skipping carries on.",
+                 (("Off", 0), ("1 line", 1), ("2 lines", 2), ("3 lines", 3)),
+                 setting="urmcSkipTypos", order=10)
+    _urm_row_add("skip_replies", "skipping", "Replies to new choices",
+                 "A short reply to a choice you have not picked before.",
+                 (("Skip them", False), ("Stop on them", True)),
+                 setting="urmcSkipTyposStrict", order=20)
+    _urm_row_add("skip_unseen", "skipping", "Skip unseen text",
+                 "Skipping runs through text you have never read.",
+                 (("On", True), ("Off", False)),
+                 get=_urms_unseen, put=_urms_unseen_put, order=30)
 
 

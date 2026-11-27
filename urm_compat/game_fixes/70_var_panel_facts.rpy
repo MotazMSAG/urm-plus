@@ -1,105 +1,38 @@
 # ---------------------------------------------------------------------------
-# The variable panel: what a value gets the player, and whether it is too late
+# The variable sheet's facts: where a value is checked and set
 # ---------------------------------------------------------------------------
 #
-# The first panel said where a name sits in the code - "found in 18 checks,
-# 18 as on/off", file:line, "== 3 x2" - and a player cannot decide anything
-# with that. This one answers what they opened the editor to ask:
+# What the sheet (74_var_window, layout C) is drawn from: one row per place
+# the game checks the name, with what that place plays and whether the
+# player has been there; one write per place the story sets it, with the
+# choice or the test behind it; where the game is now.
 #
-#   * what does each value get me - which scenes, how much, what is said
-#   * have I played that, is it still ahead of me in this scene
-#   * which choices set it, and does the game change it on its own
-#   * will my edit stick, and is it enough (the game may reset it, or the
-#     big scene may also need something else)
-#
-# Everything comes from the index's nodes, read at the moment the dialog
+# Everything comes from the index's nodes, read at the moment the sheet
 # opens. Nothing the game defines is called: conditions are worked out by a
 # small evaluator that only reads values, and gives up on any function call
 # except len().
 #
-# What it must not claim, and the footer says so: uses inside the game's own
-# functions and screens are invisible; "played" means seen on this computer
-# in any playthrough; line counts include every nested branch, so they are
-# "about"; story order across scenes is not knowable from the script, so the
-# only order used is line order inside the one scene the player is in.
+# What it cannot know: uses inside the game's own functions and screens;
+# "played" means seen on this computer in any playthrough; line counts
+# include every nested branch, so they are "about"; story order across
+# scenes is not knowable from the script, so the only order used is line
+# order.
 #
-# Everything cached here lives on x52URM.Var, in URM's _constant store, and
-# is built from python_* containers only - nothing reaches a save or the
-# rollback log.
+# Everything cached here is built from python_* containers only - nothing
+# reaches a save or the rollback log.
 
 init 999 python:
 
     import re as _urmp_re
     import sys as _urmp_sys
-    import operator as _urmp_op
-
-    _URMP_UNK = python_object()
     _URMP_NOSET = python_object()
 
     _URMP_STATUS_RANK = python_dict()
     for _urmp_i, _urmp_k in enumerate(("later", "not", "never", "above", "", "played")):
         _URMP_STATUS_RANK[_urmp_k] = _urmp_i
 
-    _URMP_STATUS_TEXT = python_dict()
-    for _urmp_k, _urmp_t, _urmp_c in (
-            ("later", "LATER IN THIS SCENE", "#e0a800"),
-            ("not", "NOT PLAYED", "#43a047"),
-            ("never", "PLAYED, NEVER SAW THIS", "#1e88e5"),
-            ("above", "EARLIER IN THIS SCENE", "#9e9e9e"),
-            ("played", "PLAYED", "#9e9e9e")):
-        _URMP_STATUS_TEXT[_urmp_k] = "{color=%s}{b}%s{/b}{/color}" % (_urmp_c, _urmp_t)
-
-    _URMP_BIN = python_dict()
-    for _urmp_k, _urmp_f in (("Add", _urmp_op.add), ("Sub", _urmp_op.sub),
-                             ("Mult", _urmp_op.mul), ("Div", _urmp_op.truediv),
-                             ("FloorDiv", _urmp_op.floordiv), ("Mod", _urmp_op.mod)):
-        if hasattr(_urmi_ast, _urmp_k):
-            _URMP_BIN[getattr(_urmi_ast, _urmp_k)] = _urmp_f
-
-    _URMP_CMP = python_dict()
-    for _urmp_k, _urmp_f in (("Eq", _urmp_op.eq), ("NotEq", _urmp_op.ne),
-                             ("Lt", _urmp_op.lt), ("LtE", _urmp_op.le),
-                             ("Gt", _urmp_op.gt), ("GtE", _urmp_op.ge),
-                             ("Is", _urmp_op.is_), ("IsNot", _urmp_op.is_not),
-                             ("In", lambda a, b: a in b),
-                             ("NotIn", lambda a, b: a not in b)):
-        if hasattr(_urmi_ast, _urmp_k):
-            _URMP_CMP[getattr(_urmi_ast, _urmp_k)] = _urmp_f
-
     _URMP_NODE_BUDGET = 40000
     _URMP_BRANCH_CAP = 3000
-    _URMP_ROWS_SHOWN = 10
-
-
-    # Stand-ins until the Flags block below replaces them, so the panel works
-    # on its own if that block is missing or failed.
-    def _urmfl_record(name):
-        return None
-
-    def _urmfl_name_of(node):
-        return None
-
-    def urmfl_is_on(name):
-        return None
-
-    def _urmp_state():
-        holder = x52URM.Var
-        st = getattr(holder, "_urmpState", None)
-        if st is None:
-            st = python_dict()
-            holder._urmpState = st
-        return st
-
-    def _urmp_bucket(key):
-        st = _urmp_state()
-        found = st.get(key)
-        if found is None:
-            found = python_dict()
-            st[key] = found
-        return found
-
-    def _urmp_isnum(value):
-        return isinstance(value, (int, float)) and not isinstance(value, bool)
 
     def _urmp_isint(value):
         return isinstance(value, int) and not isinstance(value, bool)
@@ -112,173 +45,6 @@ init 999 python:
                 if n >= 2:
                     return True
         return False
-
-
-    # ------------------------------------------------------------------
-    # A read-only evaluator
-    # ------------------------------------------------------------------
-
-    def _urmp_parse(text):
-        cache = _urmp_bucket("parse")
-        try:
-            return cache[text]
-        except KeyError:
-            pass
-        try:
-            tree = _urmi_ast.parse(text.strip(), mode="eval").body
-        except Exception:
-            tree = None
-        cache[text] = tree
-        return tree
-
-    def _urmp_ev(node, target=None, cand=None, depth=0):
-        """
-        The value of an expression from the store as it is now - or, with
-        `target`, as if that one name held `cand`. _URMP_UNK when it cannot
-        tell. Only reads: the one call it makes is len().
-        """
-
-        if depth > 40 or node is None:
-            return _URMP_UNK
-
-        if isinstance(node, (_urmi_ast.Call, _urmi_ast.Compare)):
-            flagname = _urmfl_name_of(node)
-            if flagname is not None:
-                if target is not None and flagname == target:
-                    return cand
-                value = urmfl_is_on(flagname)
-                if value is None:
-                    return _URMP_UNK
-                rec = _urmp_state().get("deps")
-                if rec is not None and len(rec) < 200:
-                    rec[flagname] = value
-                return value
-
-        if isinstance(node, (_urmi_ast.Name, _urmi_ast.Attribute, _urmi_ast.Subscript)):
-            if target is not None and _urmi_name(node) == target:
-                return cand
-            # While a panel is being worked out, remember every plain value it
-            # read, so a cached panel is thrown away when one of them changes
-            # (edit ainepoint, reopen aineroute: "you have 11" must not stay).
-            rec = _urmp_state().get("deps")
-            if rec is not None:
-                value = _urmp_ev_inner(node, target, cand, depth)
-                if len(rec) < 200 and isinstance(value, (bool, int, float, type(None)) + _urmi_text):
-                    key = _urmi_name(node)
-                    if key is not None:
-                        rec[key] = value
-                return value
-        return _urmp_ev_inner(node, target, cand, depth)
-
-    def _urmp_ev_inner(node, target, cand, depth):
-
-        ok, value = _urmi_literal(node)
-        if ok:
-            return value
-
-        try:
-            if isinstance(node, _urmi_ast.Name):
-                store = renpy.store.__dict__
-                if node.id in store:
-                    return store[node.id]
-                return _URMP_UNK
-
-            if isinstance(node, _urmi_ast.Attribute):
-                base = _urmp_ev(node.value, target, cand, depth + 1)
-                if base is _URMP_UNK:
-                    return base
-                return getattr(base, node.attr)
-
-            if isinstance(node, _urmi_ast.Subscript):
-                key = node.slice
-                if hasattr(_urmi_ast, "Index") and isinstance(key, _urmi_ast.Index):
-                    key = key.value
-                if isinstance(key, _urmi_ast.Slice):
-                    return _URMP_UNK
-                base = _urmp_ev(node.value, target, cand, depth + 1)
-                k = _urmp_ev(key, target, cand, depth + 1)
-                if base is _URMP_UNK or k is _URMP_UNK:
-                    return _URMP_UNK
-                return base[k]
-
-            if isinstance(node, _urmi_ast.BinOp):
-                fn = _URMP_BIN.get(type(node.op))
-                left = _urmp_ev(node.left, target, cand, depth + 1)
-                right = _urmp_ev(node.right, target, cand, depth + 1)
-                if fn is None or left is _URMP_UNK or right is _URMP_UNK:
-                    return _URMP_UNK
-                return fn(left, right)
-
-            if isinstance(node, _urmi_ast.UnaryOp):
-                inner = _urmp_ev(node.operand, target, cand, depth + 1)
-                if inner is _URMP_UNK:
-                    return inner
-                if isinstance(node.op, _urmi_ast.Not):
-                    return not inner
-                if isinstance(node.op, _urmi_ast.USub):
-                    return -inner
-                if isinstance(node.op, _urmi_ast.UAdd):
-                    return +inner
-                return _URMP_UNK
-
-            if isinstance(node, _urmi_ast.Compare):
-                left = _urmp_ev(node.left, target, cand, depth + 1)
-                if left is _URMP_UNK:
-                    return left
-                for op_node, comp in zip(node.ops, node.comparators):
-                    fn = _URMP_CMP.get(type(op_node))
-                    right = _urmp_ev(comp, target, cand, depth + 1)
-                    if fn is None or right is _URMP_UNK:
-                        return _URMP_UNK
-                    if not fn(left, right):
-                        return False
-                    left = right
-                return True
-
-            if isinstance(node, _urmi_ast.BoolOp):
-                unknown = False
-                is_and = isinstance(node.op, _urmi_ast.And)
-                result = is_and
-                for part in node.values:
-                    value = _urmp_ev(part, target, cand, depth + 1)
-                    if value is _URMP_UNK:
-                        unknown = True
-                        continue
-                    if is_and and not value:
-                        return value
-                    if not is_and and value:
-                        return value
-                    result = value
-                if unknown:
-                    return _URMP_UNK
-                return result
-
-            if isinstance(node, _urmi_ast.IfExp):
-                test = _urmp_ev(node.test, target, cand, depth + 1)
-                if test is _URMP_UNK:
-                    return test
-                return _urmp_ev(node.body if test else node.orelse, target, cand, depth + 1)
-
-            if isinstance(node, _urmi_ast.Call):
-                func = node.func
-                if isinstance(func, _urmi_ast.Name) and func.id == "len" \
-                        and len(node.args) == 1:
-                    inner = _urmp_ev(node.args[0], target, cand, depth + 1)
-                    if inner is _URMP_UNK:
-                        return inner
-                    return len(inner)
-                return _URMP_UNK
-
-        except Exception:
-            return _URMP_UNK
-
-        return _URMP_UNK
-
-    def _urmp_value(name):
-        if _urmfl_record(name) is not None:
-            value = urmfl_is_on(name)
-            return _URMP_UNK if value is None else value
-        return _urmp_ev(_urmp_parse(name))
 
     def _urmp_src(node, depth=0):
         """An expression written back out, for the few that have no words."""
@@ -345,69 +111,6 @@ init 999 python:
             return "%s(%s)" % (func, ", ".join(args))
         return None
 
-    def _urmp_names_in(node):
-        found = python_list()
-        _urmp_mentions(node, found)
-        return found
-
-    def _urmp_mentions(node, out):
-        """_urmi_mentions, with each flag test - true("x") - as one name."""
-
-        if isinstance(node, (_urmi_ast.Call, _urmi_ast.Compare)):
-            flagname = _urmfl_name_of(node)
-            if flagname is not None:
-                out.append(flagname)
-                return
-        if isinstance(node, (_urmi_ast.Name, _urmi_ast.Attribute, _urmi_ast.Subscript)):
-            name = _urmi_name(node)
-            if name is not None:
-                out.append(name)
-                return
-        if isinstance(node, _urmi_ast.Call):
-            for arg in node.args:
-                _urmp_mentions(arg, out)
-            for kw in getattr(node, "keywords", None) or ():
-                _urmp_mentions(kw.value, out)
-            return
-        for child in _urmi_ast.iter_child_nodes(node):
-            _urmp_mentions(child, out)
-
-
-    # ------------------------------------------------------------------
-    # Script text, made fit to show
-    # ------------------------------------------------------------------
-
-    _URMP_TAG = _urmp_re.compile(r"\{\{|\{[^{}]*\}")
-    _URMP_INTERP = _urmp_re.compile(r"\[\[|\[([A-Za-z_][\w.]*)(?:![a-z]+)?\]")
-
-    def _urmp_interp(match):
-        if match.group() == "[[":
-            return "["
-        value = _urmp_value(match.group(1))
-        if isinstance(value, _urmi_text) and len(value) <= 40:
-            return value
-        name = getattr(value, "name", None) if value is not _URMP_UNK else None
-        if isinstance(name, _urmi_text) and len(name) <= 40 and "[" not in name:
-            return name
-        return match.group()
-
-    def _urmp_plain(text, limit=110):
-        """Dialogue as plain words: tags dropped, [names] filled in, braces escaped."""
-
-        try:
-            text = u"%s" % (text,)
-        except Exception:
-            return u""
-        text = _URMP_TAG.sub(lambda m: "{" if m.group() == "{{" else "", text)
-        try:
-            text = _URMP_INTERP.sub(_urmp_interp, text)
-        except Exception:
-            pass
-        text = u" ".join(text.split())
-        if len(text) > limit:
-            text = text[:limit - 3].rstrip() + u"..."
-        return text.replace("{", "{{")
-
     def _urmp_speaker(who):
         if not who:
             return None
@@ -438,11 +141,6 @@ init 999 python:
         if who:
             return u'%s: "%s"' % (who, text)
         return u'"%s"' % (text,)
-
-    def _urmp_link(name):
-        if _urmfl_record(name) is not None:
-            return u"{a=URMFlag:%s}%s{/a}" % (name, name.replace("{", "{{"))
-        return u"{a=URMVarDialog:%s}%s{/a}" % (name, name.replace("{", "{{"))
 
 
     # ------------------------------------------------------------------
@@ -579,7 +277,7 @@ init 999 python:
             if value is False:
                 return "(turns %s OFF)" % name
             return "(sets %s to %s)" % (name, _urmp_plain(_urmi_show(value), 40))
-        if op in ("+=", "-=") and ok and _urmp_isnum(value):
+        if op in ("+=", "-=") and ok and _urm_isnum(value):
             return "(%s %s%s)" % (name, "+" if op == "+=" else "-", _urmi_show(value))
         return "(changes %s)" % name
 
@@ -627,27 +325,6 @@ init 999 python:
         cache[key] = s.lines
         return s.lines
 
-    def _urmp_size_words(s, index, budget):
-        if s.lines:
-            if s.lines == 1:
-                text = "1 line"
-            else:
-                text = "about %d lines" % s.lines
-            if s.truncated:
-                text = "at least %d lines" % s.lines
-            return text
-        if s.target:
-            n = _urmp_label_size(index, s.target, budget)
-            if n == 1:
-                return "goes to %s (1 line there)" % s.target
-            if n:
-                return "goes to %s (about %d lines there)" % (s.target, n)
-            return "goes to %s" % s.target
-        if s.calls:
-            return "plays %s" % s.calls[0]
-        if s.pictures:
-            return "pictures only"
-        return "no dialogue"
 
     def _urmp_weight(s, index, budget):
         """How much a branch plays, counting what a jump leads into."""
@@ -687,7 +364,7 @@ init 999 python:
                 return (u'"%s"' % shown, lit)
             if op == "!=":
                 return (u'anything but "%s"' % shown, _URMP_NOSET)
-        if _urmp_isnum(lit):
+        if _urm_isnum(lit):
             shown = _urmi_show(lit)
             if op == "==":
                 return ("exactly %s" % shown, lit)
@@ -787,7 +464,7 @@ init 999 python:
         for atom in atoms:
             for sub in _urmi_ast.walk(atom):
                 ok, v = _urmi_literal(sub)
-                if ok and _urmp_isnum(v):
+                if ok and _urm_isnum(v):
                     lits.append(v)
             for name in _urmp_names_in(atom):
                 if name != target and name not in others:
@@ -798,9 +475,9 @@ init 999 python:
             spread.append(abs(int(v)))
         for name in others:
             v = _urmp_value(name)
-            if _urmp_isnum(v):
+            if _urm_isnum(v):
                 spread.append(abs(int(v)) * 2)
-        if _urmp_isnum(now):
+        if _urm_isnum(now):
             spread.append(abs(int(now)) * 2)
         hi = min(max(spread) + 5, 600)
         lo = -5
@@ -855,41 +532,6 @@ init 999 python:
             words += " (with %s now)" % " and ".join(parts)
         return (words, value)
 
-    def _urmp_have(name):
-        v = _urmp_value(name)
-        if v is _URMP_UNK:
-            return None
-        if v is True:
-            return "it's ON"
-        if v is False:
-            return "it's OFF"
-        if v is None:
-            return "it's empty"
-        if _urmp_isnum(v) or isinstance(v, _urmi_text):
-            return "you have %s" % _urmp_plain(_urmi_show(v), 30)
-        return None
-
-    def _urmp_need(atom):
-        """Another requirement in words, with its name linked: (words, met now)."""
-
-        met = _urmp_ev(atom)
-        names = _urmp_names_in(atom)
-        words = None
-        if len(names) == 1:
-            simple = _urmp_simple(atom, names[0])
-            if simple is not None:
-                words = u"%s %s" % (_urmp_link(names[0]), simple[0])
-                have = _urmp_have(names[0])
-                if have and met is not True:
-                    words += " (%s)" % have
-        if words is None:
-            text = _urmp_src(atom)
-            if text is None:
-                words = "another condition (see Code)"
-            else:
-                words = u"%s" % _urmp_plain(text, 80)
-        return (words, met)
-
 
     # ------------------------------------------------------------------
     # One row per place the game checks the name
@@ -897,29 +539,6 @@ init 999 python:
 
     class _URMPRow(python_object):
         pass
-
-    def _urmp_names_of(index, cond):
-        cache = _urmp_bucket("condnames")
-        try:
-            return cache[cond]
-        except KeyError:
-            pass
-        names = python_set()
-        for kind, a, b, _c in index._condition(cond):
-            if kind == "token":
-                names.add(b)
-            elif kind != "call":
-                names.add(a)
-        tree = _urmp_parse(cond)
-        if tree is not None and index.flags:
-            for name in _urmp_names_in(tree):
-                names.add(name)
-        cache[cond] = names
-        return names
-
-    def _urmp_scene(index, node, filename, line):
-        # The story graph's one rule for "which scene is this in" (idea 1).
-        return _urmsg_label_of(index, node, filename, line)
 
     def _urmp_scene_name(scene, filename):
         if isinstance(scene, _urmi_text):
@@ -1022,7 +641,7 @@ init 999 python:
             simple = _urmp_simple(mine[0], name)
             if simple is not None:
                 result = simple
-        if result is None and mine and (_urmp_isnum(now) or now is _URMP_UNK):
+        if result is None and mine and (_urm_isnum(now) or now is _URMP_UNK):
             result = _urmp_band(mine, name, now)
         if result is None:
             text = _urmp_src(mine[0]) if len(mine) == 1 else None
@@ -1031,7 +650,7 @@ init 999 python:
             else:
                 result = ("a condition shown in Code", _URMP_NOSET)
         words, value = result
-        sort = value if _urmp_isnum(value) else None
+        sort = value if _urm_isnum(value) else None
         out = (words, value, sort)
         cache[key] = out
         return out
@@ -1124,35 +743,6 @@ init 999 python:
     class _URMPWrite(python_object):
         pass
 
-    def _urmp_question(index, menu):
-        """The line the choice answers: the menu's own caption, or the say before it."""
-
-        for item in menu.items:
-            if item[2] is None and item[0]:
-                return _urmp_plain(item[0], 90)
-        link = index.parent.get(id(menu))
-        if link is None:
-            return None
-        parent = link[0]
-        ast = renpy.ast
-        if isinstance(parent, ast.If):
-            blocks = [b for _c, b in parent.entries]
-        elif isinstance(parent, ast.Menu):
-            blocks = [i[2] for i in parent.items if i[2]]
-        else:
-            blocks = [getattr(parent, "block", None) or ()]
-        for block in blocks:
-            for i, n in enumerate(block):
-                if n is menu:
-                    for back in reversed(block[max(0, i - 4):i]):
-                        if isinstance(back, ast.Say):
-                            return _urmp_say_line(back, 90)
-                        if isinstance(back, ast.Translate):
-                            for s in back.block or ():
-                                if isinstance(s, ast.Say):
-                                    return _urmp_say_line(s, 90)
-                    return None
-        return None
 
     def _urmp_writes(index, name):
         """Every assignment of `name`, with the choice or the condition behind it."""
@@ -1197,78 +787,6 @@ init 999 python:
                     break
             out.append(w)
         return out
-
-    def _urmp_value_ok(w):
-        """Whether the literal in a write is known - None from the index means 'computed'."""
-
-        if w.op == "=":
-            return w.value is not None or _urmp_assign_none(w)
-        return w.value is not None
-
-    def _urmp_assign_none(w):
-        node = w.node
-        source = getattr(getattr(node, "code", None), "source", "") or ""
-        return "None" in source
-
-    def _urmp_effect(w, now, boolish):
-        """(words, set value) for what one write does to the name."""
-
-        op, value = w.op, w.value
-        ok = _urmp_value_ok(w)
-        if op == "=":
-            if not ok:
-                return ("changes it (worked out by the game)", _URMP_NOSET)
-            if boolish and value in (True, False) and not isinstance(value, _urmi_text):
-                return ("turns it ON" if value else "turns it OFF", value)
-            return ("sets it to %s" % _urmp_plain(_urmi_show(value), 50), value)
-        if op in ("+=", "-=") and ok and _urmp_isnum(value):
-            delta = value if op == "+=" else -value
-            sign = "+" if delta >= 0 else "-"
-            text = "%s%s" % (sign, _urmi_show(abs(delta)))
-            if _urmp_isnum(now):
-                return ("%s (you'd have %s)" % (text, _urmi_show(now + delta)), now + delta)
-            return (text, _URMP_NOSET)
-        if op in (".append", ".add") and ok:
-            return ("adds %s" % _urmp_plain(_urmi_show(value), 40), _URMP_NOSET)
-        if op in (".remove", ".discard") and ok:
-            return ("removes %s" % _urmp_plain(_urmi_show(value), 40), _URMP_NOSET)
-        return ("changes it", _URMP_NOSET)
-
-    def _urmp_effect_named(w, name):
-        """What a write does, as a phrase that names the variable."""
-
-        op, value = w.op, w.value
-        ok = _urmp_value_ok(w)
-        if op == "=" and ok:
-            if value is True:
-                return "turns %s ON" % name
-            if value is False:
-                return "turns %s OFF" % name
-            return "sets %s to %s" % (name, _urmp_plain(_urmi_show(value), 40))
-        if op in ("+=", "-=") and ok and _urmp_isnum(value):
-            up = (op == "+=") == (value >= 0)
-            return "%s %s by %s" % ("raises" if up else "lowers", name, _urmi_show(abs(value)))
-        if op in (".append", ".add") and ok:
-            return "adds %s to %s" % (_urmp_plain(_urmi_show(value), 40), name)
-        if op in (".remove", ".discard") and ok:
-            return "removes %s from %s" % (_urmp_plain(_urmi_show(value), 40), name)
-        return "changes %s" % name
-
-    def _urmp_cond_words(cond, skip=None):
-        """A whole condition in words, every name linked."""
-
-        tree = _urmp_parse(cond)
-        if tree is None:
-            return _urmp_plain(cond, 80)
-        if isinstance(tree, _urmi_ast.BoolOp) and isinstance(tree.op, _urmi_ast.And):
-            parts = tree.values
-        else:
-            parts = python_list()
-            parts.append(tree)
-        words = python_list()
-        for part in parts:
-            words.append(_urmp_need(part)[0])
-        return " and ".join(words)
 
     def _urmp_mass_labels(index):
         """Labels that set 15+ different names at once: chapter select, skip menus."""
@@ -1342,5 +860,4 @@ init 999 python:
             cache["map"] = found
         base = _urmp_re.split(r"[.\[]", name, 1)[0]
         return cache["map"].get(base) or ()
-
 

@@ -3,19 +3,14 @@ Builds the single-file URM_fix.bat out of header.bat and payload.py.
 
     python build.py [output path]
 
-The embedded sources - modcompat.py, ui_tweaks.py and the add-on - go in
-base64 encoded, so no quoting or escaping in them can break the payload.
-
-The add-on is the pieces of urm_compat/game_fixes/, joined in the order of
-their names into the ONE file the installer compiles into URM's archive
-(tests/urm_source.py holds the join and its rules). The build stops if a
-game_fixes.rpy is back next to the pieces, or if anything in that folder
-is not a piece.
+The payload contains the standalone code, its screens and the font files
+and licences. Base64 keeps the sources outside the batch parser.
 """
 
 import base64
 import io
 import os
+import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -24,7 +19,6 @@ TOOLKIT = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(TOOLKIT, "tests"))
 
 import urm_source  # noqa  (the add-on's code, joined from its pieces)
-
 
 def encoded(path):
     with open(path, "rb") as f:
@@ -38,11 +32,17 @@ def main(argv):
 
     try:
         addon = urm_source.join()
+        screens = urm_source.join_screens()
     except urm_source.SourceError as error:
         raise SystemExit("Not built: %s" % error)
 
+    version = re.search(rb'^    URMU_VERSION = "((?:0|[1-9][0-9]{0,3})(?:\.(?:0|[1-9][0-9]{0,3})){2})"\r?$',
+                        addon, re.MULTILINE)
+    if version is None:
+        raise SystemExit("Set URMU_VERSION to a three-part version before building.")
+
     with io.open(os.path.join(HERE, "header.bat"), encoding="utf-8", newline="") as f:
-        header = f.read()
+        header = f.read().replace("@@URMPLUS_VERSION@@", version.group(1).decode("ascii"))
 
     with io.open(os.path.join(HERE, "payload.py"), encoding="utf-8", newline="") as f:
         payload = f.read()
@@ -50,36 +50,25 @@ def main(argv):
     payload = payload.replace(
         "@@MODCOMPAT_B64@@", encoded(os.path.join(TOOLKIT, "modcompat.py")))
     payload = payload.replace(
-        "@@HYPERLINK_FIX_B64@@", base64.b64encode(addon).decode("ascii"))
+        "@@ADDON_B64@@", base64.b64encode(addon).decode("ascii"))
     payload = payload.replace(
-        "@@UI_TWEAKS_B64@@", encoded(os.path.join(TOOLKIT, "ui_tweaks.py")))
+        "@@SCREENS_B64@@", base64.b64encode(screens).decode("ascii"))
+    # The fonts our screens draw with, and their licence (urm_compat/fonts),
+    # as urmplus/fonts/<name> in our archive.
+    fonts = os.path.join(TOOLKIT, "fonts")
+    files = {}
+    for name in sorted(os.listdir(fonts)):
+        with open(os.path.join(fonts, name), "rb") as f:
+            files["urmplus/fonts/" + name] = base64.b64encode(f.read()).decode("ascii")
+    payload = payload.replace(
+        "@@OUR_FILES_B64@@", ";".join("%s=%s" % (k, files[k]) for k in sorted(files)))
 
     if "@@" in payload:
         raise SystemExit("A placeholder was left unfilled.")
 
     # cmd reads the file line by line and stops at exit /b, so the payload
-    # below never reaches the parser. more(1) rewrites line endings, so keep
-    # everything CRLF and tab-free.
-    if "\t" in payload:
-        raise SystemExit("Tabs in payload.py would be mangled by more.")
-
-    # Layout: the batch script, then URM's archive as base64, then the Python.
-    # The Python has to come last so `more +N` can pull it out with a single
-    # unbounded skip; the tool reads the base64 back out of the .bat itself.
-    urm = os.path.join(TOOLKIT, "0x52_URM.rpa")
-
-    if not os.path.exists(urm):
-        raise SystemExit(
-            "Put a copy of 0x52_URM.rpa in %s - it gets embedded in the .bat."
-            % TOOLKIT)
-
-    with open(urm, "rb") as f:
-        blob = base64.b64encode(f.read()).decode("ascii")
-
+    # below never reaches the parser. The header extracts the Python text.
     lines = header.replace("\r\n", "\n").split("\n")
-
-    lines.append("rem URM_BEGIN")
-    lines += [blob[i:i + 76] for i in range(0, len(blob), 76)]
 
     lines.append("rem PAYLOAD_BEGIN")
     lines += payload.replace("\r\n", "\n").split("\n")

@@ -1,5 +1,5 @@
 """
-URM compatibility helper - the tool half of URM_fix.bat.
+MRM installer - the tool half of URM_fix.bat.
 
 Run by the .bat with the game folder as its only argument, using the game's
 own bundled interpreter. Everything is driven from the menu in main().
@@ -15,6 +15,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import tempfile
 import zlib
 
 STOCK_HEADER = b"RENPY RPC2"
@@ -24,24 +25,20 @@ MD5_SIZE = 16
 
 # Filled in at build time.
 MODCOMPAT_B64 = "@@MODCOMPAT_B64@@"
-HYPERLINK_FIX_B64 = "@@HYPERLINK_FIX_B64@@"
-UI_TWEAKS_B64 = "@@UI_TWEAKS_B64@@"
+ADDON_B64 = "@@ADDON_B64@@"
+SCREENS_B64 = "@@SCREENS_B64@@"
+# Our own files beside the code, "entry=base64;entry=base64" (the fonts our
+# screens draw with, and their licence).
+OUR_FILES_B64 = "@@OUR_FILES_B64@@"
 
+# Standalone MRM: the joined code, screens and licensed fonts.
+OUR_ARCHIVE = "urmplus.rpa"
+ADDON_ENTRY = "urmplus/addon.rpyc"
+SCREENS_ENTRY = "urmplus/screens.rpyc"
 
-def load_ui_tweaks():
-    """
-    The ui_tweaks module, run out of the copy embedded in this file. It only
-    edits URM's own screen source, so a failure here is never fatal.
-    """
+# Where builds before 2026-11-21 put the add-on: inside URM's own archive.
+OLD_ADDON_ENTRY = "0x52-URM/zzz_urm_compat.rpyc"
 
-    namespace = {"__name__": "ui_tweaks"}
-
-    try:
-        exec(base64.b64decode(UI_TWEAKS_B64).decode("utf-8"), namespace)
-    except Exception:
-        return None
-
-    return namespace
 
 HOOK_ANCHOR = b"renpy.main.main()"
 HOOK = (
@@ -61,7 +58,6 @@ PROBE_FILES = [
 
 BASE = None
 RENPY = None
-BAT = None
 
 
 # ---------------------------------------------------------------- engine ---
@@ -113,7 +109,8 @@ def engine_imports():
     try:
         result = subprocess.Popen(
             # -O carries over: Ren'Py 7.3 and older ship only .pyo files.
-            [sys.executable] + (["-O"] if sys.flags.optimize else []) + ["-c", code],
+            [sys.executable] + (["-O"] if sys.flags.optimize else [])
+            + (["-I"] if sys.version_info[0] == 3 else ["-s"]) + ["-c", code],
             cwd=BASE,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         result.communicate()
@@ -242,33 +239,6 @@ def write_archive(path, contents):
         f.write(b"RPA-3.0 %016x %08x\n" % (offset, key))
 
 
-def read_stock_slots(data):
-    """
-    Pulls each slot's compressed payload out of a stock .rpyc, plus the md5 at
-    the end. None if `data` is not a stock v2 .rpyc.
-    """
-
-    if data[:len(STOCK_HEADER)] != STOCK_HEADER:
-        return None
-
-    slots = []
-    pos = len(STOCK_HEADER)
-
-    for _ in range(SLOT_ENTRIES):
-        slot, start, length = struct.unpack("III", data[pos:pos + 12])
-
-        if slot == 0:
-            break
-
-        slots.append((slot, data[start:start + length]))
-        pos += 12
-
-    if not slots:
-        return None
-
-    return slots, data[-MD5_SIZE:]
-
-
 def write_native_rpyc(renpy, slots, digest):
     """
     Emits a .rpyc the way this build's write_rpyc_* methods would.
@@ -301,14 +271,49 @@ def write_native_rpyc(renpy, slots, digest):
     return bytes(out)
 
 
-def compile_rpy(renpy, path, script_name):
+READY = []
+
+
+def ready_engine(renpy):
     """
-    Compiles a .rpy into the slot 1 payload of a .rpyc, as Script.load_file
-    does after parsing a source file. The engine applies static transforms
-    itself for a file with no slot 2.
+    Readies the engine to parse, once per run: import_all() a second time
+    fails (it pickles the stand-in script below), and screen statements need
+    the screen-language parser, which the engine's own start sets up.
     """
 
+    if READY:
+        return
+
     renpy.import_all()
+    renpy.sl2.slparser.init()
+
+    class FakeScript(object):
+        record_pycode = False
+        all_pycode = []
+        serial = 0
+
+        def __getattr__(self, name):
+            return None
+
+    class FakeContext(object):
+        init_phase = True
+
+    renpy.game.script = FakeScript()
+
+    if not renpy.game.contexts:
+        renpy.game.contexts = [FakeContext()]
+
+    READY.append(True)
+
+
+def compile_rpy(renpy, path, script_name):
+    with open(path, "rb") as f:
+        return compile_source(renpy, f.read(), path, script_name)
+
+
+def compile_source(renpy, source, filename, script_name):
+    """Compile source in the game's format. The engine builds slot 2."""
+    ready_engine(renpy)
 
     if sys.version_info[0] == 2:
         # Every Ren'Py 7 writes its .rpyc files with protocol 2 (script.py:
@@ -322,27 +327,11 @@ def compile_rpy(renpy, path, script_name):
     else:
         from renpy.compat.pickle import dumps
 
-    class FakeScript(object):
-        record_pycode = False
-        all_pycode = []
-        serial = 0
-
-        def __getattr__(self, name):
-            return None
-
-    class FakeContext(object):
-        init_phase = True
-
-    script = FakeScript()
-    renpy.game.script = script
-
-    if not renpy.game.contexts:
-        renpy.game.contexts = [FakeContext()]
-
-    statements = renpy.parser.parse(path)
+    script = renpy.game.script
+    statements = renpy.parser.parse(filename, filedata=source.decode("utf-8").lstrip(u"\ufeff"))
 
     if statements is None:
-        raise ValueError("%s failed to parse." % path)
+        raise ValueError("%s failed to parse." % filename)
 
     # Every node needs a unique name, or the loader rejects the file as
     # defining a name twice.
@@ -359,160 +348,49 @@ def compile_rpy(renpy, path, script_name):
 
     payload = zlib.compress(dumps((data, statements)), 3)
 
-    with open(path, "rb") as f:
-        digest = hashlib.md5(f.read()).digest()
-
-    return payload, digest
+    return payload, hashlib.md5(source).digest()
 
 
 # ---------------------------------------------------------------- source ---
 
-URM_MARKER = "rem URM_BEGIN"
-PAYLOAD_MARKER = "rem PAYLOAD_BEGIN"
-
-
-def read_embedded_urm():
-    """
-    Reads URM's archive back out of the .bat, where it sits base64 encoded
-    between the two markers.
-    """
-
-    if not BAT or not os.path.exists(BAT):
-        return None
-
-    lines = []
-    collecting = False
-
-    with open(BAT, "r") as f:
-        for line in f:
-            line = line.strip()
-
-            if line == URM_MARKER:
-                collecting = True
-                continue
-
-            if line == PAYLOAD_MARKER:
-                break
-
-            if collecting and line:
-                lines.append(line)
-
-    if not lines:
-        return None
-
-    try:
-        return base64.b64decode("".join(lines))
-    except Exception:
-        return None
-
-
-def shadowing_copy():
-    """
-    Path to a loose, unpacked copy of URM sitting in game/, or None.
-
-    Ren'Py looks on disk before it looks in an archive, so an unpacked
-    0x52-URM/ directory - what UnRen leaves behind - wins over game/0x52_URM.rpa
-    completely. URM still loads, so nothing looks wrong, but it is the old
-    unpacked copy running and no change to the archive has any effect.
-    """
-
-    loose = os.path.join(BASE, "game", "0x52-URM")
-
-    if os.path.isdir(loose):
-        return loose
-
-    return None
-
-
-def move_shadowing_copy(loose):
-    """
-    Moves a loose copy out of game/ so the archive is used again. Returns the
-    new location, or None if it could not be moved.
-    """
-
-    target = os.path.join(BASE, "0x52-URM.unpacked-copy")
-
-    suffix = 2
-    while os.path.exists(target):
-        target = os.path.join(BASE, "0x52-URM.unpacked-copy-%d" % suffix)
-        suffix += 1
-
-    try:
-        shutil.move(loose, target)
-    except Exception:
-        return None
-
-    return target
-
-
 def is_ours(contents):
     """
-    True for an archive this tool or a URM+ build already wrote. It carries
-    the add-on and the interface tweaks of its day, so installing from it
-    would keep those - only a plain URM is a good starting point.
+    True for a URM archive an older URM+ build wrote: it carries the add-on
+    and the interface tweaks of its day, so installing from it would keep
+    those - only a plain URM is a good starting point. (Builds since
+    2026-11-21 leave URM's archive as URM ships it.)
     """
 
-    if "0x52-URM/zzz_urm_compat.rpyc" in contents:
+    if OLD_ADDON_ENTRY in contents:
         return True
 
-    # A failed install can leave the tweaks without the add-on. The tweaks'
-    # settings are all named urmc..., which plain URM never mentions.
-    return any(b"urmc" in data for name, data in contents.items()
-               if name.endswith(".x52"))
+    # A failed install can leave the tweaks without the add-on (the build of
+    # 2026-10-28 wrote exactly that). Every build's tweaks name a setting
+    # urmc... or a helper _urm...; plain URM's screens mention neither.
+    return any(old_screen_edit(data)
+               for name, data in contents.items()
+               if name.endswith((".x52", ".x52t")))
 
 
-def choose_source(renpy):
-    """
-    Where to take URM from, in order of how deliberate the choice is:
+def old_screen_edit(data):
+    return b"urmc" in data or b"_urm" in data
 
-      1. a 0x52_URM.rpa the user dropped next to the .bat - an explicit
-         override, and how a newer URM gets used without a new .bat
-      2. one already sitting in game/ in stock form - what a normal URM
-         install leaves behind, possibly a newer version than the bundled one
-      3. the copy embedded in this .bat
 
-    Returns (label, contents) or (None, None).
-    """
-
-    beside = os.path.join(os.path.dirname(BAT or BASE), "0x52_URM.rpa")
-
-    if os.path.exists(beside):
-        try:
-            contents = read_archive(beside)
-
-            if not is_ours(contents):
-                return "the copy next to this .bat", contents
-        except Exception:
-            pass
-
-    installed = os.path.join(BASE, "game", "0x52_URM.rpa")
-
-    if os.path.exists(installed):
-        try:
-            contents = read_archive(installed)
-            scripts = [n for n in contents if n.endswith(".rpyc")]
-
-            if not is_ours(contents) and scripts and all(
-                    contents[n][:len(STOCK_HEADER)] == STOCK_HEADER for n in scripts):
-                return "the copy already in game/", contents
-        except Exception:
-            pass
-
-    blob = read_embedded_urm()
-
-    if blob is None:
-        return None, None
-
-    temp = os.path.join(BASE, "_urmfix_source.rpa")
-
-    try:
-        with open(temp, "wb") as f:
-            f.write(blob)
-
-        return "the copy built into this .bat", read_archive(temp)
-    finally:
-        if os.path.exists(temp):
-            os.remove(temp)
+def urm_holds_old_addon():
+    """Recognize an older combined install, archived or extracted."""
+    game = os.path.join(BASE, "game")
+    previous = os.path.join(game, OLD_ADDON_ENTRY)
+    if os.path.isfile(previous) or os.path.isfile(previous[:-1]):
+        return True
+    loose = os.path.dirname(previous)
+    for directory, _folders, files in os.walk(loose):
+        for name in files:
+            if name.endswith((".x52", ".x52t")):
+                with open(os.path.join(directory, name), "rb") as f:
+                    if old_screen_edit(f.read()):
+                        return True
+    installed = os.path.join(game, "0x52_URM.rpa")
+    return os.path.isfile(installed) and is_ours(read_archive(installed))
 
 
 # --------------------------------------------------------------- actions ---
@@ -522,19 +400,22 @@ def game_is_open():
     True when the game in BASE is running. A running program's .exe, and an
     archive the engine is reading, cannot be opened for writing on Windows -
     so try exactly that, without writing anything. Ren'Py 8 keeps its
-    archives open while it runs, and writing over 0x52_URM.rpa then failed
-    with a raw PermissionError (Obscure Affairs, 2026-11-18).
+    archives open while it runs, and replacing an open archive failed
+    with a raw PermissionError.
     """
 
     busy = [os.path.join(BASE, n) for n in os.listdir(BASE) if n.lower().endswith(".exe")]
-    busy.append(os.path.join(BASE, "game", "0x52_URM.rpa"))
+    busy.append(os.path.join(BASE, "game", OUR_ARCHIVE))
 
     for path in busy:
         # A read-only file refuses writing for its own reason; not "open".
         if not os.path.isfile(path) or not os.access(path, os.W_OK):
             continue
         try:
-            fd = os.open(path, os.O_RDWR)
+            # Binary: Windows opens a file for writing in text mode by
+            # default, and then cuts a last byte of Ctrl+Z (0x1A) off it - an
+            # archive whose index happens to end in one came back broken.
+            fd = os.open(path, os.O_RDWR | getattr(os, "O_BINARY", 0))
         except (IOError, OSError):
             return True
         os.close(fd)
@@ -548,179 +429,83 @@ def say_game_is_open():
     print("    Nothing was changed.")
 
 
-def replace_file(src, dst):
-    """os.replace, which Python 2 does not have."""
-
-    if hasattr(os, "replace"):
-        os.replace(src, dst)
-        return
-    if not os.path.exists(dst):
-        os.rename(src, dst)
-        return
-    old = dst + ".urmold"
-    if os.path.exists(old):
-        os.remove(old)
-    os.rename(dst, old)
+def write_install(target, contents):
+    """Publish the complete archive in one filesystem operation."""
+    fd, pending = tempfile.mkstemp(prefix=".urmplus-", suffix=".tmp", dir=os.path.dirname(target))
+    os.close(fd)
     try:
-        os.rename(src, dst)
-    except Exception:
-        os.rename(old, dst)
-        raise
-    os.remove(old)
+        write_archive(pending, contents)
+        if hasattr(os, "replace"):
+            os.replace(pending, target)
+        elif os.name == "nt":
+            import ctypes
+            move = ctypes.windll.kernel32.MoveFileExW
+            encoding = sys.getfilesystemencoding()
+            source = pending.decode(encoding) if isinstance(pending, bytes) else pending
+            dest = target.decode(encoding) if isinstance(target, bytes) else target
+            if not move(source, dest, 1 | 8):
+                raise ctypes.WinError()
+        else:
+            os.rename(pending, target)
+    finally:
+        if os.path.exists(pending):
+            os.remove(pending)
 
 
 def action_install():
-    """
-    Writes URM into game/, re-encoded to this build's script format if it uses
-    one. The same path serves both kinds of game: on a normal build the
-    re-encode is a no-op, so nothing about the archive changes except the
-    hyperlink fix being added.
-
-    Only ever writes game/0x52_URM.rpa. The game's own archives are never read
-    or touched.
-    """
-
     if game_is_open():
         say_game_is_open()
         return False
 
-    renpy = load_engine()
+    try:
+        if urm_holds_old_addon():
+            print()
+            print("  ! An older combined URM and URM+ copy is in game/.")
+            print("    Move game/0x52_URM.rpa or the combined game/0x52-URM folder")
+            print("    to a backup outside game/, then run this installer again.")
+            print("    Keep the backup. Nothing was changed.")
+            return False
+    except (IOError, OSError, ValueError, EOFError, zlib.error, pickle.UnpicklingError) as error:
+        print("  ! Could not examine the older archive: %s" % error)
+        print("    Nothing was changed.")
+        return False
 
+    renpy = load_engine()
     if renpy is None:
         print()
         print("  The engine will not load. If you patched it earlier, undo")
         print("  that with option 3 first.")
         return False
 
-    header = getattr(renpy, "_RPYC_HEADER", STOCK_HEADER)
-    pack = getattr(renpy, "compress_bytecode_stream", None)
-    protected = header != STOCK_HEADER or pack is not None
-
-    label, contents = choose_source(renpy)
-
-    if contents is None:
+    contents = {}
+    try:
+        for filename, encoded, entry in (
+                ("_urmfix_hyperlink.rpy", ADDON_B64, ADDON_ENTRY),
+                ("_urmfix_screens.rpy", SCREENS_B64, SCREENS_ENTRY)):
+            data, digest = compile_source(renpy, base64.b64decode(encoded), filename, entry[:-1])
+            contents[entry] = write_native_rpyc(renpy, [(1, data)], digest)
+        for item in OUR_FILES_B64.split(";"):
+            entry, encoded = item.split("=", 1)
+            contents[entry] = base64.b64decode(encoded)
+    except Exception as error:
         print()
-        print("  Could not find URM to install - this .bat looks damaged.")
-        print("  Re-download it, or put a 0x52_URM.rpa next to it.")
+        print("  ! Could not build MRM for this game: %s" % error)
+        print("    Nothing was changed. Please report this line.")
         return False
 
-    print()
-    print("  Installing from %s." % label)
-
-    if protected:
-        print("  This game encrypts its script cache, so URM is being")
-        print("  re-encoded to match.")
-    else:
-        print("  This game reads add-on scripts as they come, so no")
-        print("  re-encoding is needed.")
-
-    # URM's screens are plain text inside its archive, so the interface tweaks
-    # are literal edits made here, before anything is re-encoded.
-    tweaks = load_ui_tweaks()
-
-    if tweaks is not None:
-        try:
-            applied, skipped = tweaks["apply"](contents)
-
-            for name, _note in applied:
-                print("  Showing %s." % name)
-
-            for name, why in skipped:
-                print("  ! Skipped '%s' - %s" % (name, why))
-        except Exception as e:
-            print("  ! Could not apply the interface tweaks: %s" % e)
-
-    converted = 0
-
-    for name in sorted(contents):
-        if not name.endswith(".rpyc"):
-            continue
-
-        slots = read_stock_slots(contents[name])
-
-        if slots is None:
-            continue
-
-        contents[name] = write_native_rpyc(renpy, slots[0], slots[1])
-        converted += 1
-
-    if not converted:
-        print()
-        print("  That archive holds no stock script files. If it is already")
-        print("  converted, URM is installed - just start the game.")
-        return True
-
+    target = os.path.join(BASE, "game", OUR_ARCHIVE)
     try:
-        temp = os.path.join(BASE, "_urmfix_hyperlink.rpy")
-
-        with open(temp, "wb") as f:
-            f.write(base64.b64decode(HYPERLINK_FIX_B64))
-
-        try:
-            name = "0x52-URM/zzz_urm_compat.rpyc"
-            payload, digest = compile_rpy(renpy, temp, name[:-1])
-            contents[name] = write_native_rpyc(renpy, [(1, payload)], digest)
-            print("  Added the compatibility fixes.")
-        finally:
-            os.remove(temp)
-    except Exception as e:
-        # Stop, and leave the game exactly as it was. Writing URM without the
-        # add-on used to be the fallback, but the screens are already tweaked
-        # to use the add-on, and saves made with it refer to it: Freeloading
-        # Family (Ren'Py 7.4.11) got that half install and its saves stopped
-        # loading with "'StoreModule' object has no attribute ...".
-        print()
-        print("  ! Could not build URM+ for this game: %s" % e)
-        print("    Nothing was changed - the game is exactly as it was.")
-        print("    Please report this line; it names what went wrong.")
-        return False
-
-    target = os.path.join(BASE, "game", "0x52_URM.rpa")
-    side = target + ".urmnew"
-
-    # Written beside the old archive and swapped in whole, so a failure at
-    # any point leaves the old one exactly as it was.
-    try:
-        write_archive(side, contents)
-        replace_file(side, target)
-    except (IOError, OSError) as e:
-        try:
-            if os.path.exists(side):
-                os.remove(side)
-        except (IOError, OSError):
-            pass
+        write_install(target, contents)
+    except (IOError, OSError) as error:
         if game_is_open():
             say_game_is_open()
         else:
-            print()
-            print("  ! Could not write game\\0x52_URM.rpa: %s" % e)
+            print("  ! Could not write game/%s: %s" % (OUR_ARCHIVE, error))
             print("    Nothing was changed.")
         return False
 
-    loose = shadowing_copy()
-
-    if loose is not None:
-        moved = move_shadowing_copy(loose)
-
-        if moved is not None:
-            print()
-            print("  There was an unpacked copy of URM in game\\0x52-URM, left")
-            print("  behind by an extraction tool. Ren'Py reads loose files")
-            print("  before archives, so that copy was being used instead of")
-            print("  URM's archive - and nothing written here would have had")
-            print("  any effect. Moved it to %s." % os.path.basename(moved))
-        else:
-            print()
-            print("  ! There is an unpacked copy of URM in game\\0x52-URM.")
-            print("    Ren'Py reads loose files before archives, so that copy")
-            print("    is used instead of the one just written. Delete or move")
-            print("    game\\0x52-URM, then start the game.")
-
-    print("  Wrote %s  (%d script files)"
-          % (os.path.relpath(target, BASE), converted))
-
-    print()
-    print("  Done. Start the game - URM's tab is in the top-left corner.")
+    print("  Wrote game/%s (MRM)" % OUR_ARCHIVE)
+    print("  Done. Start the game.")
     return True
 
 
@@ -839,15 +624,6 @@ def action_diagnose():
         n for n in os.listdir(os.path.join(BASE, "renpy"))
         if n.startswith("_glcache")) or "none"))
 
-    loose = shadowing_copy()
-
-    if loose is not None:
-        print()
-        print("  ! game\\0x52-URM exists - an unpacked copy of URM. Ren'Py")
-        print("    reads loose files before archives, so this is what runs,")
-        print("    not game\\0x52_URM.rpa. Installing cannot change anything")
-        print("    until it is moved away. Option 1 moves it for you.")
-
     print()
     print("  Archives in game/:")
 
@@ -903,7 +679,7 @@ def banner():
 
     print()
     print("  " + "=" * 62)
-    print("   URM compatibility helper")
+    print("   Multiversal Ren'Py Mod (MRM) installer")
     print("  " + "=" * 62)
     print()
     print("   Game:      %s" % name)
@@ -935,8 +711,8 @@ def ask(prompt):
 def menu():
     while True:
         print("  " + "-" * 62)
-        print("   1)  Install URM into this game        (start here)")
-        print("   2)  Patch the engine instead")
+        print("   1)  Install MRM into this game       (start here)")
+        print("   2)  Patch the engine for other add-ons")
         print("   3)  Undo the engine patch")
         print("   4)  Show me what this game does")
         print("   0)  Quit")
@@ -967,16 +743,13 @@ def menu():
 
 
 def main(argv):
-    global BASE, BAT
+    global BASE
 
     if len(argv) < 2:
         print("Run this through URM_fix.bat.")
         return 2
 
     BASE = os.path.abspath(argv[1])
-
-    if len(argv) > 2:
-        BAT = os.path.abspath(argv[2])
 
     if not os.path.isdir(os.path.join(BASE, "game")):
         print()

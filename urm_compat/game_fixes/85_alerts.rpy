@@ -14,33 +14,25 @@
 # every way in: jumps, calls, replays. Checks made inside the game's own
 # python functions are not seen, as everywhere else in URM+.
 #
-# The marks are kept in URM's own per-game settings.
+# The marks are kept in URM+'s own per-game settings.
 
 init 999 python:
 
-    try:
-        x52URM.SettingsClass.defaultValues.setdefault("urmcAlerts", None)
-    except Exception as error:
-        print("URM+: alerts setting not registered (%s)" % (error,))
+    _urm_setting_add("urmcAlerts", None)
 
     class _URMALState(python_object):
         def __init__(self):
             self.names = python_dict()   # id(node) -> [(arm, condition, option, marked names)]
-            self.lines = python_list()   # what the banner says
+            self.head = u""              # the banner's headline: what was checked, where
+            self.rows = python_list()    # (what was tested, its verdict, the verdict's tone)
+            self.stopped = False         # the alert stopped a skip
             self.marked = python_list()  # what the banner is about
 
     def _urmal_state():
-        st = getattr(x52URM.Var, "_urmalState", None)
-        if st is None:
-            st = _URMALState()
-            x52URM.Var._urmalState = st
-        return st
+        return _urm_kept("alerts", _URMALState)
 
     def urmal_marked():
-        try:
-            return x52URM.Settings.get("urmcAlerts") or ()
-        except Exception:
-            return ()
+        return _urm_setting("urmcAlerts") or ()
 
     def urmal_is(name):
         return name in urmal_marked()
@@ -49,14 +41,14 @@ init 999 python:
         marks = python_list(urmal_marked())
         if name in marks:
             marks.remove(name)
-            words = "URM+: no longer alerting for %s"
+            words = "MRM: no longer alerting for %s"
         else:
             marks.append(name)
-            words = "URM+: you will be alerted when the game checks %s"
+            words = "MRM: you will be alerted when the game checks %s"
         try:
-            x52URM.Settings.set("urmcAlerts", marks)
+            _urm_setting_set("urmcAlerts", marks)
         except Exception as error:
-            renpy.notify("URM+: could not save the alert (%s)" % (error,))
+            renpy.notify("MRM: could not save the alert (%s)" % (error,))
             return
         renpy.notify(words % name)
         renpy.restart_interaction()
@@ -100,7 +92,7 @@ init 999 python:
             return
 
         scene = _urmp_scene(index, node, node.filename, node.linenumber) or "?"
-        lines = python_list()
+        rows = python_list()
         named = python_list()
         is_menu = isinstance(node, renpy.ast.Menu)
         fired = False
@@ -108,37 +100,42 @@ init 999 python:
             for name in hit:
                 if name not in named:
                     named.append(name)
-            try:
-                passed = bool(renpy.python.py_eval(cond))
-            except Exception:
-                passed = None
+            passed = _urm_truth(cond)
+            # The verdict is a tone chip (UX rule 9): green it plays, red it
+            # does not, amber it passes but another way runs, plain unknown.
+            # A number test that plays or not says it as a goal (rule 8,
+            # the user's pick 2b): "you have 1, needs 3".
             if is_menu:
-                verdict = {True: "shown", False: "hidden", None: "can't tell"}[passed]
-                lines.append(u'The choice "%s" needs it - %s' % (_urmp_plain(option, 60), verdict))
-            elif passed and not fired:
-                fired = True
-                lines.append(u"%s - passes: what it gates plays now" % _urmp_plain(cond, 80))
-            elif passed is None:
-                lines.append(u"%s - can't tell" % _urmp_plain(cond, 80))
+                what = u'The choice "%s" needs it' % _urmp_plain(option, 60)
+                verdict, tone = {True: (u"shown", "gain"), False: (u"hidden", "loss"),
+                                 None: (u"can't tell", "plain")}[passed]
             else:
-                lines.append(u"%s - %s" % (_urmp_plain(cond, 80),
-                                           "doesn't pass" if not passed else "passes, but an earlier branch runs"))
+                what = _urmp_plain(cond, 80)
+                if passed and not fired:
+                    fired = True
+                    verdict, tone = u"passes: what it gates plays now", "gain"
+                elif passed is None:
+                    verdict, tone = u"can't tell", "plain"
+                elif not passed:
+                    verdict, tone = u"doesn't pass", "loss"
+                else:
+                    verdict, tone = u"passes, but an earlier branch runs", "warn"
+            if tone in ("gain", "loss"):
+                verdict = urm_goal_words(cond) or verdict
+            rows.append((what, verdict, tone))
 
         st.marked = named
-        st.lines = python_list()
-        st.lines.append(u"%s checked in %s" % (u", ".join(_urmp_plain(n, 60) for n in named),
-                                              _urmp_plain(scene, 60)))
-        st.lines.extend(lines[:4])
-        if config.skipping:
+        st.head = u"%s checked in %s" % (u", ".join(_urmp_plain(n, 60) for n in named),
+                                         _urmp_plain(scene, 60))
+        st.rows = python_list(rows[:4])
+        st.stopped = bool(config.skipping)
+        if st.stopped:
             config.skipping = None
-            st.lines.append(u"Skipping stopped.")
         if renpy.has_screen("urmal_alert"):
-            for layer in (_urmi_layer, "overlay"):
-                try:
-                    renpy.show_screen("urmal_alert", _layer=layer)
-                    break
-                except Exception:
-                    continue
+            try:
+                renpy.show_screen("urmal_alert", _layer=_urmi_layer)
+            except Exception as error:
+                print("MRM: the alert could not show (%s)" % (error,))
 
     def _urmal_wrap(previous):
         def execute(self, *args, **kwargs):
@@ -159,9 +156,9 @@ init 999 python:
             if not getattr(_urmal_prev, "_urmal", False):
                 _urmal_cls.execute = _urmal_wrap(_urmal_prev)
         except Exception as error:
-            print("URM+: alerts not watching %s (%s)" % (_urmal_cls.__name__, error))
+            print("MRM: alerts not watching %s (%s)" % (_urmal_cls.__name__, error))
 
-    # The banner is shown on URM's own layer, so a plain Hide('urmal_alert')
+    # The banner is shown on the URM+ layer, so a plain Hide('urmal_alert')
     # looks on the default "screens" layer, finds nothing, and the OK button,
     # "Stop alerting" and the timer all did nothing (2026-11-17). Hide it on
     # whichever layer it is on.
@@ -177,10 +174,25 @@ init 999 python:
         urmal_toggle(name)
         urmal_close()
 
-    def urmal_lines():
-        return _urmal_state().lines
+    def urmal_view():
+        """What the banner shows: (headline, rows, whether a skip stopped,
+        the names it is about)."""
 
-    def urmal_banner_marked():
-        return _urmal_state().marked
+        st = _urmal_state()
+        return st.head, st.rows, st.stopped, st.marked
 
+    # ---- the URM+ menu (the registry, 01_urm_door): only while something
+    # is marked, since there is nothing to stop otherwise
 
+    def _urmal_count():
+        return u"%d on" % len(urmal_marked())
+
+    def _urmal_items():
+        """Each marked name in words, with a Stop that unmarks it."""
+        return [(_urmp_plain(name, 60), u"Stop", (lambda n=name: urmal_toggle(n)))
+                for name in urmal_marked()]
+
+    # The menu folds the marked names out under it (the user's pick a,
+    # 2026-11-22).
+    _urm_entry_add("alerts", "Alerts", u"\ue7f4", None, count=_urmal_count,
+                   shown=lambda: bool(urmal_marked()), items=_urmal_items, group=1, order=30)

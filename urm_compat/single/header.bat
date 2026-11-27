@@ -1,8 +1,9 @@
 @echo off
+rem URMPLUS_VERSION=@@URMPLUS_VERSION@@
 setlocal disabledelayedexpansion enableextensions
 
 rem ==========================================================================
-rem  URM_fix.bat - makes URM work in Ren'Py games that encrypt their scripts.
+rem  URM_fix.bat - installs Multiversal Ren'Py Mod (MRM) into Ren'Py games.
 rem
 rem  Put this file in the game folder, next to the game's .exe, and
 rem  double-click it. A menu will walk you through the rest.
@@ -18,7 +19,7 @@ rem  No delayed expansion anywhere: with it on, every "!" in a folder name is
 rem  eaten, and a game in "Game!" is looked for in "Game".
 rem ==========================================================================
 
-title URM fix
+title MRM installer
 
 set "GAME=%~1"
 if not defined GAME for %%I in ("%~dp0.") do set "GAME=%%~fI"
@@ -46,28 +47,33 @@ if not defined PY (
     echo   "%GAME%\lib".
     echo.
     echo   Is this the folder with the game's .exe in it? URM_fix needs the
-    echo   game's own copy of Python to install URM.
+    echo   game's own copy of Python to install MRM.
     goto :finish
 )
 
 rem Ren'Py 7.3 and older keep the standard library beside the interpreter
 rem rather than inside it, and native modules beside the interpreter.
 rem Their library is .pyo files only, which Python 2 loads only with -O.
-set "PYFLAGS="
+set "PYFLAGS=-s"
+for %%F in ("%PY%\..") do set "PYDIR=%%~fF"
+for %%F in ("%PYDIR%") do set "PYKIND=%%~nxF"
+if /i "%PYKIND:~0,3%"=="py3" set "PYFLAGS=-I"
 set "PYTHONHOME="
 set "PYTHONPATH="
 set "PYLIB="
-for %%F in ("%PY%\..") do set "PYDIR=%%~fF"
 for /d %%D in ("%GAME%\lib\pythonlib*") do set "PYLIB=%%~D"
 if defined PYLIB set "PYTHONPATH=%PYLIB%;%PYDIR%"
-if defined PYLIB set "PYFLAGS=-O"
+if defined PYLIB set "PYFLAGS=-O -s"
 
 rem The Python half is read straight out of this file and run - no copy is
-rem written. It gets the game folder, this file (where URM is embedded) and
+rem written. It gets the game folder, this file and
 rem the optional "install" argument.
 "%PY%" %PYFLAGS% -c "import sys;f=open(sys.argv[1],'rb');s=f.read().decode('utf-8').replace('\r\n','\n');f.close();sys.argv=['urmfix',sys.argv[2],sys.argv[1]]+sys.argv[3:];exec(compile(s.split('\nrem PAYLOAD_BEGIN\n',1)[1],'urmfix.py','exec'),{'__name__':'__main__'})" "%~f0" "%GAME%" %2
+set "RESULT=%ERRORLEVEL%"
+if /i "%~2"=="install" exit /b %RESULT%
 
 :finish
+if /i "%~2"=="install" exit /b 1
 echo.
 pause
 endlocal

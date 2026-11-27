@@ -28,25 +28,16 @@ init 999 python:
 
     import sys as _urmr_sys
 
-    try:
-        x52URM.SettingsClass.defaultValues.setdefault("urmcRollback", 500)
-    except Exception as error:
-        print("URM+: rollback setting not registered (%s)" % (error,))
+    _urm_setting_add("urmcRollback", 500)
 
     class _URMRState(python_object):
         def __init__(self):
             self.game_hard = None
             self.game_length = None
             self.applied = None
-            self.resume = None             # the skip path detection stopped
 
     def _urmr_state():
-        holder = x52URM.Var
-        st = getattr(holder, "_urmrState", None)
-        if st is None:
-            st = _URMRState()
-            holder._urmrState = st
-        return st
+        return _urm_kept("rollback", _URMRState)
 
     def _urmr_apply():
         st = _urmr_state()
@@ -55,10 +46,7 @@ init 999 python:
             # game has had its say.
             st.game_hard = config.hard_rollback_limit
             st.game_length = config.rollback_length
-        try:
-            want = x52URM.Settings.get("urmcRollback")
-        except Exception:
-            want = 500
+        want = _urm_setting("urmcRollback")
         if want is None:
             want = 500
         if want == st.applied:
@@ -77,7 +65,7 @@ init 999 python:
         except Exception:
             pass
         try:
-            _urmr_forget_resume_at_menu()
+            _urmr_check_skip_hold()
         except Exception:
             pass
 
@@ -114,7 +102,7 @@ init 999 python:
                 break
 
         if target is None:
-            renpy.notify("URM: no choice in the rollback history to go back to")
+            renpy.notify("MRM: no choice in the rollback history to go back to")
             return False
 
         steps = 0
@@ -125,7 +113,7 @@ init 999 python:
             steps = 1
 
         if steps > getattr(log, "rollback_limit", 0):
-            renpy.notify("URM: the game blocks going back that far")
+            renpy.notify("MRM: the game blocks going back that far")
             return False
 
         renpy.rollback(checkpoints=steps)
@@ -147,13 +135,7 @@ init 999 python:
         return False
 
     class _URMRMiddleClick(renpy.Displayable):
-        """
-        Two mouse jobs, from the top layer so nothing below sees them first:
-
-        * a middle click on a Skip button rolls back to the last choice
-        * after URM stopped a skip on path detection, the next left click on
-          empty space resumes that skip (see _urmr_cancel_skipping)
-        """
+        """Middle-click on a Skip button rolls back to the last choice."""
 
         # The quick menu's screen lands in saves, and this with it. Saved as
         # a plain Null, so a save never needs URM+ to load: a save made with
@@ -167,18 +149,7 @@ init 999 python:
             return renpy.Render(0, 0)
 
         def event(self, ev, x, y, st):
-            kind = getattr(ev, "type", None)
-            button = getattr(ev, "button", None)
-            if kind == _urmr_mouse_up and button == 1:
-                state = _urmr_state()
-                if state.resume and not config.skipping and _urmr_empty_click():
-                    config.skipping = state.resume
-                    state.resume = None
-                    renpy.restart_interaction()
-                    # Taken, not passed on: the dialogue's own click handler
-                    # stops skipping when it sees a click while skipping.
-                    raise _urmr_sys.modules["renpy.display.core"].IgnoreEvent()
-            elif kind == _urmr_mouse_up and button == 2:
+            if getattr(ev, "type", None) == _urmr_mouse_up and getattr(ev, "button", None) == 2:
                 if _urmr_skip_focused():
                     urmr_back_to_choice()
                     raise _urmr_sys.modules["renpy.display.core"].IgnoreEvent()
@@ -189,67 +160,83 @@ init 999 python:
     except Exception:
         import pygame as _urmr_pygame
     _urmr_mouse_up = _urmr_pygame.MOUSEBUTTONUP
-
-    def _urmr_empty_click():
-        """No button under the mouse: the click is one that advances dialogue."""
-
-        try:
-            focus = _urmr_sys.modules["renpy.display.focus"].get_focused()
-        except Exception:
-            return False
-        return focus is None or type(focus).__name__ == "SayBehavior"
-
+    _urmr_mouse_click_events = (_urmr_pygame.MOUSEBUTTONDOWN, _urmr_mouse_up)
 
     # ------------------------------------------------------------------
-    # Resume a skip that path detection stopped
+    # Resume a skip stopped at a check
     # ------------------------------------------------------------------
     #
-    # With "Stop skipping on path detection" on, URM cancels the skip the
-    # moment a path card appears (watchpanel.rpy.x52:310-311, CancelSkipping
-    # in utils.rpy:121). Clicking on then only advances one line at a time.
-    # The skip URM cancelled - slow, or fast to the next choice - is
-    # remembered here, and the next left click on empty space picks it up
-    # again. A click on a button does not, a choice menu forgets it (Ren'Py
-    # stops skipping there anyway), and so do rolling back - the player
-    # stopping on purpose - and loading a save.
+    # Let Ren'Py complete an ordinary dialogue dismissal with skipping off,
+    # then restore the mode held by the corner card for the next interaction.
 
-    def _urmr_cancel_skipping_wrap(original):
-        def cancel(self, *args, **kwargs):
-            if config.skipping:
-                _urmr_state().resume = config.skipping
-            return original(self, *args, **kwargs)
-        cancel._urmr_original = original
-        return cancel
+    _urmr_say_event = renpy.display.behavior.SayBehavior.event
 
-    try:
-        _urmr_cancel = x52URM.CancelSkipping.__call__
-        if not hasattr(_urmr_cancel, "_urmr_original"):
-            x52URM.CancelSkipping.__call__ = _urmr_cancel_skipping_wrap(_urmr_cancel)
-    except Exception as error:
-        print("URM+: skipping will not resume after path detection (%s)" % (error,))
+    def _urmr_resume_on_dismiss(self, ev, x, y, st):
+        if ev.type not in _urmr_mouse_click_events or ev.button != 1 or config.skipping:
+            return _urmr_say_event(self, ev, x, y, st)
+        resume = _urm_skip_held()
+        if not resume:
+            return _urmr_say_event(self, ev, x, y, st)
 
-    def _urmr_forget_resume_at_menu():
-        state = _urmr_state()
-        if not state.resume:
+        # An AFM timeout can also return True on a mouse event. The engine
+        # calls allow_dismiss only on the manual path, after its focus,
+        # rollback-side and AFM cancellation checks.
+        previous = self.allow_dismiss
+        dismissed = [False]
+
+        def allow_dismiss():
+            dismissed[0] = not previous or bool(previous())
+            return dismissed[0]
+
+        self.allow_dismiss = allow_dismiss
+        try:
+            result = _urmr_say_event(self, ev, x, y, st)
+        finally:
+            self.allow_dismiss = previous
+
+        if result is True and dismissed[0] and _urm_skip_held() == resume:
+            _urm_skip_forget()
+            if not config.skipping and config.allow_skipping and renpy.store._skipping:
+                config.skipping = resume
+        return result
+
+    renpy.display.behavior.SayBehavior.event = _urmr_resume_on_dismiss
+
+    def _urmr_check_skip_hold():
+        if not _urm_skip_held():
+            return
+        # A restarted skip belongs to the player now. Discard the old hold
+        # so manually stopping again cannot restart it on a dialogue click.
+        if config.skipping:
+            _urm_skip_forget()
             return
         # Rolling back is the player stopping on purpose: a resume pending
         # from before must not restart the skip on the next click.
         try:
             log = renpy.game.log
             if renpy.game.after_rollback or (log is not None and log.in_rollback()):
-                state.resume = None
+                _urm_skip_forget()
                 return
         except Exception:
             pass
         if isinstance(_urmsg_here(), renpy.ast.Menu):
-            state.resume = None
+            _urm_skip_forget()
 
     def _urmr_forget_resume():
-        _urmr_state().resume = None
+        _urm_skip_forget()
 
     if _urmr_forget_resume not in config.after_load_callbacks:
         config.after_load_callbacks.append(_urmr_forget_resume)
 
     urmr_middle_click = _URMRMiddleClick()
+
+    # ---- the Quick access action and settings page (the registry, 01_urm_door)
+
+    _urm_entry_add("back_to_choice", "Back to last choice", u"\ue166", urmr_back_to_choice,
+                   shown=lambda: False)
+    _urm_row_add("rollback_length", "game", "Rollback length",
+                 "How many steps back you can scroll. Longer costs memory and makes saves larger.",
+                 (("Game default", 0), ("500", 500), ("2000", 2000)),
+                 setting="urmcRollback", order=10)
 
 

@@ -2,7 +2,7 @@
 # Mazes, and where a choice's flags are checked later
 # ---------------------------------------------------------------------------
 #
-# Used by urm_choice_cards above, at draw time. Its own block because it
+# Used by the choice cards (34_words), at draw time. Its own block because it
 # keeps a per-menu cache and reads the script index, so it is held to the
 # untracked-containers rule (run_tests.py step 7d).
 
@@ -12,7 +12,7 @@ init 999 python:
     # Mazes: follow a choice to where its effects really are
     # ------------------------------------------------------------------
     #
-    # Many games write a menu as nothing but jumps - "Go left": jump left2 -
+    # A menu arm can consist only of a jump, with no local effects,
     # and set their flags at the label, sometimes two or three menus further
     # in. Reading the arm's own block then shows only "jump left2". So each
     # arm is walked the way the engine would run it: through jumps, calls and
@@ -43,7 +43,6 @@ init 999 python:
     import re as _urmm_re
     _URMM_PYJUMP = _urmm_re.compile(
         r"""^renpy\.(jump|call)\(\s*(?:label\s*=\s*)?["']([\w.]+)["']\s*\)$""")
-    _URMM_TAG = _urmm_re.compile(r"\{[^{}]*\}")
 
     class _URMMState(python_object):
         def __init__(self):
@@ -140,8 +139,13 @@ init 999 python:
     # text, the reason on demand.
     _URMM_CODE_TIP = "The game runs its own code here"
 
+    # A line of story text kept in a value (Heavenly Vows: a rival's
+    # thoughts = _("...")) is something the game says, not a change.
+    _URMM_SAYS = _urmm_re.compile(r"""^[^=]+=\s*_{1,2}\(\s*[uU]?["']""")
+
     def _urmm_real(records):
-        return python_list(r for r in records if not r[1].startswith(u"\x00"))
+        return python_list(r for r in records if not r[1].startswith(u"\x00")
+                           and not _URMM_SAYS.match(r[1]))
 
     def _urmm_dyn_again(said, guards, text):
         """True when a box or a card row already says, behind the same
@@ -284,6 +288,9 @@ init 999 python:
         short by its part is read again with whatever the others left.
         """
 
+        return _urmsg_drain(_urmm_walk_each_steps(w, ways, stack, seen, extra))
+
+    def _urmm_walk_each_steps(w, ways, stack, seen, extra=0):
         whole = w.limit
         out = python_list()
         used = python_list()
@@ -292,7 +299,13 @@ init 999 python:
             parts = len(ways) - n + extra
             before = w.steps
             w.limit = w.steps + max(0, whole - w.steps) // max(1, parts)
-            out.append((label, _urmm_walk(w, start, stack, seen, depth, chain)))
+            segment = None
+            for _said in _urmm_walk_steps(w, start, stack, seen, depth, chain):
+                if isinstance(_said, _URMSGDone):
+                    segment = _said.result
+                    break
+                yield _said
+            out.append((label, segment))
             used.append(w.steps - before)
             n += 1
 
@@ -306,11 +319,17 @@ init 999 python:
                 room = whole - held - w.steps
                 if room > used[n]:
                     w.limit = whole - held
-                    out[n] = (label, _urmm_walk(w, start, stack, seen, depth, chain))
+                    segment = None
+                    for _said in _urmm_walk_steps(w, start, stack, seen, depth, chain):
+                        if isinstance(_said, _URMSGDone):
+                            segment = _said.result
+                            break
+                        yield _said
+                    out[n] = (label, segment)
             n += 1
 
         w.limit = whole
-        return out
+        yield _URMSGDone(out)
 
     def _urmm_idle(walked):
         """Every way through a split gives nothing and ends the same way:
@@ -350,6 +369,9 @@ init 999 python:
         each one line and a jump back to the menu, were six boxes.)
         """
 
+        return _urmsg_drain(_urmm_fork_steps(w, at, stack, seen, depth, chain))
+
+    def _urmm_fork_steps(w, at, stack, seen, depth, chain):
         # A check: an if, or a python jump made only sometimes (idea 6).
         is_if = _urmsg_kind(at) != _URMSG_K_MENU
         ways = python_list()
@@ -375,7 +397,8 @@ init 999 python:
                 doors.add(u"")
         else:
             if depth >= _URMM_DEPTH:
-                return python_list(), ("more", len(arms))
+                yield _URMSGDone((python_list(), ("more", len(arms))))
+                return
             for _i, cond, _authored, block, start, text in arms:
                 ways.append((_urmm_choice_label((text, cond)), start,
                              depth + 1, chain + 1))
@@ -389,11 +412,17 @@ init 999 python:
                 doors.add(u"")
 
         if chain >= _URMM_CHAIN:
-            return python_list(), ("ahead",)
+            yield _URMSGDone((python_list(), ("ahead",)))
+            return
 
         own = None
         try:
-            plan = _urmm_plan(at, blocks, _urmsg_sites(stack))
+            plan = None
+            for _said in _urmsg_plan_steps(at, blocks, _URMM_REACH, _urmsg_sites(stack)):
+                if isinstance(_said, _URMSGDone):
+                    plan = _said.result
+                    break
+                yield _said
             own = plan[1] if plan is not None else None
         except Exception:
             own = None
@@ -412,7 +441,12 @@ init 999 python:
             w.stop = id(own)
             w.outer = outer
 
-        walked = _urmm_walk_each(w, ways, stack, seen, 1 if own is not None else 0)
+        walked = None
+        for _said in _urmm_walk_each_steps(w, ways, stack, seen, 1 if own is not None else 0):
+            if isinstance(_said, _URMSGDone):
+                walked = _said.result
+                break
+            yield _said
 
         w.stop = kept_stop
         w.outer = kept_outer
@@ -427,8 +461,12 @@ init 999 python:
             if joined:
                 # From the stack the ways had when they met: they may have
                 # left the called scene the split is in.
-                after = _urmm_walk(w, own, w.met.get(id(own), stack), seen,
-                                   depth, chain + 1)
+                for _said in _urmm_walk_steps(w, own, w.met.get(id(own), stack), seen,
+                                              depth, chain + 1):
+                    if isinstance(_said, _URMSGDone):
+                        after = _said.result
+                        break
+                    yield _said
 
         # Ways that jump to DIFFERENT scenes are a real split even when
         # nothing tracked changes: the player sees another scene.
@@ -437,10 +475,12 @@ init 999 python:
             added = python_list((((), mark),))
             if after is not None:
                 added.extend(after[0])
-                return added, after[1]
-            return added, walked[0][1][1]
+                yield _URMSGDone((added, after[1]))
+                return
+            yield _URMSGDone((added, walked[0][1][1]))
+            return
 
-        return python_list(), ("fork", walked, "if" if is_if else "menu", after)
+        yield _URMSGDone((python_list(), ("fork", walked, "if" if is_if else "menu", after)))
 
     def _urmm_walk(w, node, stack, seen, depth, chain=0):
         """
@@ -459,25 +499,36 @@ init 999 python:
         map's trunk walk; what happens at a split is _urmm_fork.
         """
 
+        return _urmsg_drain(_urmm_walk_steps(w, node, stack, seen, depth, chain))
+
+    def _urmm_walk_steps(w, node, stack, seen, depth, chain=0):
         stack = python_list(stack)
         seen = python_set(seen)
 
         records, end, at = _urmsg_run(w, node, stack, seen)
+        yield None
 
         if end[0] != "split":
-            return records, end
+            yield _URMSGDone((records, end))
+            return
 
-        added, end = _urmm_fork(w, at, stack, seen, depth, chain)
+        forked = None
+        for _said in _urmm_fork_steps(w, at, stack, seen, depth, chain):
+            if isinstance(_said, _URMSGDone):
+                forked = _said.result
+                break
+            yield _said
+        added, end = forked
         records.extend(added)
-        return records, end
+        yield _URMSGDone((records, end))
 
     _URMM_ENDS = python_dict((
         ("meet", None),
         ("here", "back to this menu"),
         ("loop", "loops back to an earlier point"),
         ("return", "returns"),
-        ("limit", "goes on further than URM+ follows"),
-        ("ahead", "goes on further than URM+ follows"),
+        ("limit", "goes on further than MRM follows"),
+        ("ahead", "goes on further than MRM follows"),
         ("later", "joins the others further on"),
         ("dyn", None),
     ))
@@ -566,21 +617,36 @@ init 999 python:
         when no way reached it.
         """
 
+        return _urmsg_drain(_urmm_arms_steps(menu, blocks, plan, stack, met))
+
+    def _urmm_arms_steps(menu, blocks, plan=None, stack=(), met=None):
+        """_urmm_arms in steps (the choice ahead, 33_map_screen)."""
+
         if plan is None:
-            plan = _urmm_plan(menu, blocks, _urmsg_sites(stack))
+            for _said in _urmsg_plan_steps(menu, blocks, _URMM_REACH, _urmsg_sites(stack)):
+                if isinstance(_said, _URMSGDone):
+                    plan = _said.result
+                    break
+                yield _said
         if plan is None:
-            return None
+            yield _URMSGDone(None)
+            return
 
         starts, stop = plan
         w = _URMSGWalk(id(stop) if stop is not None else None, menu,
                        _URMM_STEPS, _URMSG_KEEP_ARM)
 
         ways = python_list((None, start, 0, 0) for start in starts)
-        out = python_list(segment for _label, segment in
-                          _urmm_walk_each(w, ways, stack, ()))
+        walked = None
+        for _said in _urmm_walk_each_steps(w, ways, stack, ()):
+            if isinstance(_said, _URMSGDone):
+                walked = _said.result
+                break
+            yield _said
+        out = python_list(segment for _label, segment in walked)
         if met is not None:
             met.append(w.met.get(id(stop)) if stop is not None else None)
-        return out
+        yield _URMSGDone(out)
 
     # ------------------------------------------------------------------
     # Checked later: where the game finally tests what a choice set
@@ -630,8 +696,20 @@ init 999 python:
         reached from where the game is - a test after the called scene has
         returned is "later" too (idea 7)."""
 
-        return _urmsg_reach(start, None, _URMM_LATER, False,
-                            _urmsg_flow_from(sites))[0]
+        return _urmm_reach_later(start, sites)[0]
+
+    def _urmm_reach_later(start, sites=()):
+        """(_urmm_distances, cut, the statements): cut when the search
+        stopped at _URMM_LATER statements, so what lies further on is not
+        in it."""
+
+        table, cut = _urmsg_reach(start, None, _URMM_LATER, True, _urmsg_flow_from(sites))
+        dist = python_dict()
+        statements = python_list()
+        for key, (far, node) in table.items():
+            dist[key] = far
+            statements.append(node)
+        return dist, cut, statements
 
     def _urmm_show(value):
         try:
@@ -707,4 +785,3 @@ init 999 python:
                          _urm_words("checked later: ") + _urm_colorize(text)
                          + " " + _urm_words("(%s)" % where)))
         return rows
-
